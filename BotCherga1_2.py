@@ -4,21 +4,15 @@ import threading
 import time
 from datetime import datetime, timedelta
 from flask import Flask
-import cloudscraper
-from bs4 import BeautifulSoup
 import requests
-import urllib3
-from requests.adapters import HTTPAdapter
-from urllib3.util.ssl_ import create_urllib3_context
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from bs4 import BeautifulSoup
 
 # --- Налаштування Flask для Render Web Service ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "ZOE Monitor Bot is running 24/7!", 200
+    return "ZOE Monitor Bot via ScraperAPI is running 24/7!", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -27,23 +21,10 @@ def run_flask():
 # --- Основні конфігурації бота ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8631538633:AAHg84NPAG9ozFxm9_Ikjtd9H2YpeKZ659c")
 CHAT_ID = os.environ.get("CHAT_ID", "1033814627")
-URL = "https://www.zoe.com.ua/outage/"
-CHECK_INTERVAL_SECONDS = 120
+SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "7ba5fdfc4a308ae20ca2793434044b0e")
+TARGET_URL = "https://www.zoe.com.ua/outage/"
+CHECK_INTERVAL_SECONDS = 180  # Перевірка кожні 3 хвилини
 CACHE_FILE = "last_schedule_1_2.txt"
-
-PROXIES_LIST = [
-    None,
-    {"http": "http://194.44.208.194:8080", "https": "http://194.44.208.194:8080"},
-    {"http": "http://185.233.112.222:8080", "https": "http://185.233.112.222:8080"},
-]
-
-class CustomSSLAdapter(HTTPAdapter):
-    def init_poolmanager(self, *args, **kwargs):
-        ctx = create_urllib3_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = False
-        kwargs["ssl_context"] = ctx
-        return super().init_poolmanager(*args, **kwargs)
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -56,25 +37,22 @@ def send_telegram(text):
         return False
 
 def get_page():
-    scraper = cloudscraper.create_scraper(
-        browser={"browser": "chrome", "platform": "windows", "desktop": True}
-    )
-    scraper.mount("https://", CustomSSLAdapter())
-    scraper.verify = False
+    if not SCRAPER_API_KEY:
+        print("⚠️ Помилка: SCRAPER_API_KEY не знайдено!", flush=True)
+        return None
 
-    for proxy in PROXIES_LIST:
-        try:
-            if proxy:
-                response = scraper.get(URL, timeout=15, proxies=proxy)
-            else:
-                response = scraper.get(URL, timeout=15)
+    # Запит через ScraperAPI з українським IP (country_code=ua)
+    scraper_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={TARGET_URL}&country_code=ua"
+    
+    try:
+        response = requests.get(scraper_url, timeout=30)
+        if response.status_code == 200:
+            return response.text
+        else:
+            print(f"⚠️ ScraperAPI повернув статус: {response.status_code}", flush=True)
+    except Exception as e:
+        print(f"⚠️ Помилка мережі через ScraperAPI: {e}", flush=True)
 
-            if response.status_code == 200:
-                return response.text
-        except Exception:
-            continue
-
-    print("⚠️ Не вдалося з'єднатися із сайтом ЗОЕ.", flush=True)
     return None
 
 def get_ukrainian_months():
@@ -159,17 +137,21 @@ def parse_zoe_posts(html_text):
     return today_str, "🟢 Відключень для населення наразі немає (актуальний ГПВ не оприлюднено)."
 
 def bot_loop():
-    print("🚀 Скрипт моніторингу ЗОЕ запущено на Render!", flush=True)
+    print("🚀 Скрипт моніторингу ЗОЕ через ScraperAPI запущено!", flush=True)
 
     while True:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] Перевіряємо сторінку ЗОЕ...", flush=True)
+        print(f"[{timestamp}] Перевіряємо сторінку ЗОЕ через ScraperAPI...", flush=True)
 
         html = get_page()
 
         if html:
             target_date, schedule_1_2 = parse_zoe_posts(html)
             current_data = f"{target_date} | {schedule_1_2}".strip()
+
+            print(f"\n--- РЕЗУЛЬТАТ ПАРСИНГУ ---", flush=True)
+            print(f"📅 Дата: {target_date}", flush=True)
+            print(f"📍 Черга 1.2: {schedule_1_2}", flush=True)
 
             last_data = ""
             if os.path.exists(CACHE_FILE):
@@ -195,7 +177,5 @@ def bot_loop():
         time.sleep(CHECK_INTERVAL_SECONDS)
 
 if __name__ == "__main__":
-    # Запускаємо моніторинг у фоновому потоці
     threading.Thread(target=bot_loop, daemon=True).start()
-    # Запускаємо веб-сервер Flask для Render
     run_flask()
