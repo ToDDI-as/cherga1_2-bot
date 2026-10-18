@@ -3,7 +3,7 @@ name: ZOE Outage Monitor
 on:
   schedule:
     # Запуск кожні 10 хвилин
-    - cron: '*/10 * * * *'
+    - cron: '*/2 * * * *'
   workflow_dispatch: # Дозволяє запускати вручну з сайту GitHub
 
 jobs:
