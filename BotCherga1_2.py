@@ -1,8 +1,9 @@
 import os
 import re
-import sys
+import threading
 import time
 from datetime import datetime, timedelta
+from flask import Flask
 import cloudscraper
 from bs4 import BeautifulSoup
 import requests
@@ -12,19 +13,29 @@ from urllib3.util.ssl_ import create_urllib3_context
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# --- Налаштування Flask для Render Web Service ---
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "ZOE Monitor Bot is running 24/7!", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+# --- Основні конфігурації бота ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8631538633:AAHg84NPAG9ozFxm9_Ikjtd9H2YpeKZ659c")
 CHAT_ID = os.environ.get("CHAT_ID", "1033814627")
 URL = "https://www.zoe.com.ua/outage/"
-CHECK_INTERVAL_SECONDS = 120  # Перевірка кожні 2 хвилини
+CHECK_INTERVAL_SECONDS = 120
 CACHE_FILE = "last_schedule_1_2.txt"
 
-# Публічні проксі для обходу гео-блокування закордонних хмарних серверів
 PROXIES_LIST = [
-    None,  # Спочатку пробуємо напряму
+    None,
     {"http": "http://194.44.208.194:8080", "https": "http://194.44.208.194:8080"},
     {"http": "http://185.233.112.222:8080", "https": "http://185.233.112.222:8080"},
 ]
-
 
 class CustomSSLAdapter(HTTPAdapter):
     def init_poolmanager(self, *args, **kwargs):
@@ -34,7 +45,6 @@ class CustomSSLAdapter(HTTPAdapter):
         kwargs["ssl_context"] = ctx
         return super().init_poolmanager(*args, **kwargs)
 
-
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
@@ -42,9 +52,8 @@ def send_telegram(text):
         response = requests.post(url, json=payload, timeout=10)
         return response.ok
     except Exception as e:
-        print(f"❌ Помилка відправки в Telegram: {e}")
+        print(f"❌ Помилка відправки в Telegram: {e}", flush=True)
         return False
-
 
 def get_page():
     scraper = cloudscraper.create_scraper(
@@ -65,9 +74,8 @@ def get_page():
         except Exception:
             continue
 
-    print("⚠️ Не вдалося з'єднатися із сайтом ЗОЕ ні напряму, ні через проксі.")
+    print("⚠️ Не вдалося з'єднатися із сайтом ЗОЕ.", flush=True)
     return None
-
 
 def get_ukrainian_months():
     return {
@@ -75,7 +83,6 @@ def get_ukrainian_months():
         5: "травня", 6: "червня", 7: "липня", 8: "серпня",
         9: "вересня", 10: "жовтня", 11: "листопада", 12: "грудня"
     }
-
 
 def parse_zoe_posts(html_text):
     soup = BeautifulSoup(html_text, "html.parser")
@@ -151,13 +158,12 @@ def parse_zoe_posts(html_text):
 
     return today_str, "🟢 Відключень для населення наразі немає (актуальний ГПВ не оприлюднено)."
 
-
-def main():
-    print("🚀 Скрипт моніторингу ЗОЕ запущено на Render!")
+def bot_loop():
+    print("🚀 Скрипт моніторингу ЗОЕ запущено на Render!", flush=True)
 
     while True:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] Перевіряємо сторінку ЗОЕ...")
+        print(f"[{timestamp}] Перевіряємо сторінку ЗОЕ...", flush=True)
 
         html = get_page()
 
@@ -171,7 +177,7 @@ def main():
                     last_data = f.read().strip()
 
             if current_data != last_data:
-                print("⚡ Зміни виявлено! Відправляємо в Telegram...")
+                print("⚡ Зміни виявлено! Відправляємо в Telegram...", flush=True)
                 msg = (
                     f"⚡ <b>ОНОВЛЕННЯ ГРАФІКА ЗОЕ</b>\n"
                     f"📅 <b>Графік на дату:</b> <u>{target_date}</u>\n"
@@ -182,13 +188,14 @@ def main():
                 if send_telegram(msg):
                     with open(CACHE_FILE, "w", encoding="utf-8") as f:
                         f.write(current_data)
-                    print("✅ Збережено в кеш.")
+                    print("✅ Збережено в кеш.", flush=True)
             else:
-                print("Змін у графіку немає.")
+                print("Змін у графіку немає.", flush=True)
 
-        # Не зупиняємо процес при помилці — чекаємо наступної ітерації
         time.sleep(CHECK_INTERVAL_SECONDS)
 
-
 if __name__ == "__main__":
-    main()
+    # Запускаємо моніторинг у фоновому потоці
+    threading.Thread(target=bot_loop, daemon=True).start()
+    # Запускаємо веб-сервер Flask для Render
+    run_flask()
