@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta
 import cloudscraper
 from bs4 import BeautifulSoup
@@ -11,11 +12,18 @@ from urllib3.util.ssl_ import create_urllib3_context
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Зчитуємо ключі зі змінних оточення GitHub Secrets
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8631538633:AAHg84NPAG9ozFxm9_Ikjtd9H2YpeKZ659c")
 CHAT_ID = os.environ.get("CHAT_ID", "1033814627")
 URL = "https://www.zoe.com.ua/outage/"
+CHECK_INTERVAL_SECONDS = 120  # Перевірка кожні 2 хвилини
 CACHE_FILE = "last_schedule_1_2.txt"
+
+# Публічні проксі для обходу гео-блокування закордонних хмарних серверів
+PROXIES_LIST = [
+    None,  # Спочатку пробуємо напряму
+    {"http": "http://194.44.208.194:8080", "https": "http://194.44.208.194:8080"},
+    {"http": "http://185.233.112.222:8080", "https": "http://185.233.112.222:8080"},
+]
 
 
 class CustomSSLAdapter(HTTPAdapter):
@@ -45,13 +53,19 @@ def get_page():
     scraper.mount("https://", CustomSSLAdapter())
     scraper.verify = False
 
-    try:
-        # Таймаут 15 секунд для захисту від зависання хмари
-        response = scraper.get(URL, timeout=15)
-        if response.status_code == 200:
-            return response.text
-    except Exception as e:
-        print(f"⚠️ Помилка мережі при запиті до ЗОЕ: {e}")
+    for proxy in PROXIES_LIST:
+        try:
+            if proxy:
+                response = scraper.get(URL, timeout=15, proxies=proxy)
+            else:
+                response = scraper.get(URL, timeout=15)
+
+            if response.status_code == 200:
+                return response.text
+        except Exception:
+            continue
+
+    print("⚠️ Не вдалося з'єднатися із сайтом ЗОЕ ні напряму, ні через проксі.")
     return None
 
 
@@ -74,11 +88,11 @@ def parse_zoe_posts(html_text):
 
     now = datetime.now()
     months = get_ukrainian_months()
-    
+
     today_num = now.day
     today_month = months[now.month]
     today_str = f"{today_num} {today_month}"
-    
+
     tomorrow = now + timedelta(days=1)
     tomorrow_str = f"{tomorrow.day} {months[tomorrow.month]}"
 
@@ -139,41 +153,41 @@ def parse_zoe_posts(html_text):
 
 
 def main():
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] Перевіряємо сторінку ЗОЕ...")
+    print("🚀 Скрипт моніторингу ЗОЕ запущено на Render!")
 
-    html = get_page()
+    while True:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] Перевіряємо сторінку ЗОЕ...")
 
-    if not html:
-        print("❌ Не вдалося завантажити сторінку ЗОЕ.")
-        sys.exit(0)
+        html = get_page()
 
-    target_date, schedule_1_2 = parse_zoe_posts(html)
-    current_data = f"{target_date} | {schedule_1_2}".strip()
+        if html:
+            target_date, schedule_1_2 = parse_zoe_posts(html)
+            current_data = f"{target_date} | {schedule_1_2}".strip()
 
-    print(f"📅 Дата: {target_date}")
-    print(f"📍 Черга 1.2: {schedule_1_2}")
+            last_data = ""
+            if os.path.exists(CACHE_FILE):
+                with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                    last_data = f.read().strip()
 
-    last_data = ""
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, "r", encoding="utf-8") as f:
-            last_data = f.read().strip()
+            if current_data != last_data:
+                print("⚡ Зміни виявлено! Відправляємо в Telegram...")
+                msg = (
+                    f"⚡ <b>ОНОВЛЕННЯ ГРАФІКА ЗОЕ</b>\n"
+                    f"📅 <b>Графік на дату:</b> <u>{target_date}</u>\n"
+                    f"🕒 <i>Отримано: {timestamp}</i>\n\n"
+                    f"📍 <b>Черга 1.2:</b>\n"
+                    f"{schedule_1_2}"
+                )
+                if send_telegram(msg):
+                    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                        f.write(current_data)
+                    print("✅ Збережено в кеш.")
+            else:
+                print("Змін у графіку немає.")
 
-    if current_data != last_data:
-        print("⚡ Зміни виявлено! Надсилаємо повідомлення в Telegram...")
-        msg = (
-            f"⚡ <b>ОНОВЛЕННЯ ГРАФІКА ЗОЕ</b>\n"
-            f"📅 <b>Графік на дату:</b> <u>{target_date}</u>\n"
-            f"🕒 <i>Отримано: {timestamp}</i>\n\n"
-            f"📍 <b>Черга 1.2:</b>\n"
-            f"{schedule_1_2}"
-        )
-        if send_telegram(msg):
-            with open(CACHE_FILE, "w", encoding="utf-8") as f:
-                f.write(current_data)
-            print("✅ Зміни збережено в кеш.")
-    else:
-        print("Змін порівняно з попереднім сповіщенням немає.")
+        # Не зупиняємо процес при помилці — чекаємо наступної ітерації
+        time.sleep(CHECK_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
