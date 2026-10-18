@@ -1,6 +1,6 @@
 import os
 import re
-import time
+import sys
 from datetime import datetime, timedelta
 import cloudscraper
 from bs4 import BeautifulSoup
@@ -11,10 +11,10 @@ from urllib3.util.ssl_ import create_urllib3_context
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-BOT_TOKEN = "8631538633:AAHg84NPAG9ozFxm9_Ikjtd9H2YpeKZ659c"
-CHAT_ID = "1033814627"
+# Зчитуємо ключі зі змінних оточення GitHub Secrets
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8631538633:AAHg84NPAG9ozFxm9_Ikjtd9H2YpeKZ659c")
+CHAT_ID = os.environ.get("CHAT_ID", "1033814627")
 URL = "https://www.zoe.com.ua/outage/"
-CHECK_INTERVAL_SECONDS = 300
 CACHE_FILE = "last_schedule_1_2.txt"
 
 
@@ -46,7 +46,8 @@ def get_page():
     scraper.verify = False
 
     try:
-        response = scraper.get(URL, timeout=12)
+        # Таймаут 15 секунд для захисту від зависання хмари
+        response = scraper.get(URL, timeout=15)
         if response.status_code == 200:
             return response.text
     except Exception as e:
@@ -71,18 +72,16 @@ def parse_zoe_posts(html_text):
     text_full = soup.get_text(separator="\n")
     lines = [line.strip() for line in text_full.splitlines() if line.strip()]
 
-    # Розраховуємо актуальні дати (сьогодні та завтра)
     now = datetime.now()
     months = get_ukrainian_months()
     
     today_num = now.day
     today_month = months[now.month]
-    today_str = f"{today_num} {today_month}"  # наприклад "18 жовтня"
+    today_str = f"{today_num} {today_month}"
     
     tomorrow = now + timedelta(days=1)
-    tomorrow_str = f"{tomorrow.day} {months[tomorrow.month]}"  # наприклад "19 жовтня"
+    tomorrow_str = f"{tomorrow.day} {months[tomorrow.month]}"
 
-    # 1. Розбиваємо текст на блоки новин ГПВ
     date_pattern = re.compile(
         r"(\d{1,2}\s+(?:січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|листопада|грудня)|\d{1,2}\.\d{2}(?:\.\d{2,4})?)",
         re.IGNORECASE,
@@ -113,16 +112,13 @@ def parse_zoe_posts(html_text):
     if current_block:
         gpv_blocks.append(current_block)
 
-    # 2. Шукаємо ГПВ блок ТІЛЬКИ для актуальних дат (сьогодні або завтра)
     relevant_block = None
     for block in gpv_blocks:
         h_date = block["header_date"].lower()
-        # Перевіряємо чи входить сьогоднішня або завтрашня дата у заголовок
         if str(today_num) in h_date or today_str in h_date or str(tomorrow.day) in h_date or tomorrow_str in h_date:
             relevant_block = block
             break
 
-    # Якщо знайшли актуальний блок ГПВ
     if relevant_block:
         header_date = relevant_block["header_date"]
         block_text = relevant_block["text"]
@@ -135,59 +131,49 @@ def parse_zoe_posts(html_text):
 
         if match_queue:
             raw_time = match_queue.group(1).strip().rstrip(",")
-            return header_date, f"• {raw_time}", "Знайдено актуальний графік"
+            return header_date, f"• {raw_time}"
         else:
-            return header_date, "🟢 Для Черги 1.2 відключень у цьому графіку немає.", "Черга 1.2 не вимикається"
+            return header_date, "🟢 Для Черги 1.2 відключень у цьому графіку немає."
 
-    # Якщо на сайті немає оприлюднених ГПВ за сьогодні/завтра
-    return today_str, "🟢 Відключень для населення наразі немає (актуальний ГПВ не оприлюднено).", "Немає актуальних ГПВ"
+    return today_str, "🟢 Відключень для населення наразі немає (актуальний ГПВ не оприлюднено)."
 
 
 def main():
-    print("🚀 Скрипт моніторингу ЗОЕ запущено!")
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] Перевіряємо сторінку ЗОЕ...")
 
+    html = get_page()
+
+    if not html:
+        print("❌ Не вдалося завантажити сторінку ЗОЕ.")
+        sys.exit(0)
+
+    target_date, schedule_1_2 = parse_zoe_posts(html)
+    current_data = f"{target_date} | {schedule_1_2}".strip()
+
+    print(f"📅 Дата: {target_date}")
+    print(f"📍 Черга 1.2: {schedule_1_2}")
+
+    last_data = ""
     if os.path.exists(CACHE_FILE):
-        os.remove(CACHE_FILE)
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            last_data = f.read().strip()
 
-    while True:
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] Перевіряємо сторінку ЗОЕ...")
-
-        html = get_page()
-
-        if html:
-            target_date, schedule_1_2, status_note = parse_zoe_posts(html)
-            current_data = f"{target_date} | {schedule_1_2}".strip()
-
-            print(f"\n--- РЕЗУЛЬТАТ ПАРСИНГУ ---")
-            print(f"📅 Дата: {target_date}")
-            print(f"📍 Черга 1.2: {schedule_1_2}")
-            print(f"ℹ️ Статус: {status_note}\n---------------------------\n")
-
-            msg = (
-                f"⚡ <b>ОНОВЛЕННЯ ГРАФІКА ЗОЕ</b>\n"
-                f"📅 <b>Графік на дату:</b> <u>{target_date}</u>\n"
-                f"🕒 <i>Отримано: {timestamp}</i>\n\n"
-                f"📍 <b>Черга 1.2:</b>\n"
-                f"{schedule_1_2}"
-            )
-
-            last_data = ""
-            if os.path.exists(CACHE_FILE):
-                with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                    last_data = f.read().strip()
-
-            if current_data != last_data:
-                print("⚡ Зміни виявлено! Відправляємо в Telegram...")
-                if send_telegram(msg):
-                    with open(CACHE_FILE, "w", encoding="utf-8") as f:
-                        f.write(current_data)
-            else:
-                print("Змін порівняно з попереднім сповіщенням немає.")
-        else:
-            print("❌ Не вдалося завантажити сторінку.")
-
-        time.sleep(CHECK_INTERVAL_SECONDS)
+    if current_data != last_data:
+        print("⚡ Зміни виявлено! Надсилаємо повідомлення в Telegram...")
+        msg = (
+            f"⚡ <b>ОНОВЛЕННЯ ГРАФІКА ЗОЕ</b>\n"
+            f"📅 <b>Графік на дату:</b> <u>{target_date}</u>\n"
+            f"🕒 <i>Отримано: {timestamp}</i>\n\n"
+            f"📍 <b>Черга 1.2:</b>\n"
+            f"{schedule_1_2}"
+        )
+        if send_telegram(msg):
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                f.write(current_data)
+            print("✅ Зміни збережено в кеш.")
+    else:
+        print("Змін порівняно з попереднім сповіщенням немає.")
 
 
 if __name__ == "__main__":
