@@ -2,9 +2,9 @@ name: ZOE Outage Monitor
 
 on:
   schedule:
-    # Запуск кожні 10 хвилин
-    - cron: '*/2 * * * *'
-  workflow_dispatch: # Дозволяє запускати вручну з сайту GitHub
+    # Запуск кожні 5 хвилин
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 jobs:
   check-zoe:
@@ -36,6 +36,7 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          UKRAINE_PROXY: ${{ secrets.UKRAINE_PROXY }}
         run: python BotCherga1_2.py
 
       - name: Збереження кешу для наступного запуску
