@@ -10,9 +10,9 @@ from bs4 import BeautifulSoup
 # --- Налаштування Flask для Render Web Service ---
 app = Flask(__name__)
 
-@app.route('/')
+@app.route('/', methods=['GET', 'HEAD'])
 def home():
-    return "ZOE Monitor Bot via ScraperAPI is running 24/7!", 200
+    return "OK", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -41,11 +41,20 @@ def get_page():
         print("⚠️ Помилка: SCRAPER_API_KEY не знайдено!", flush=True)
         return None
 
-    # Запит через ScraperAPI з українським IP (country_code=ua)
-    scraper_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={TARGET_URL}&country_code=ua"
+    # Додаємо випадковий параметр _t, щоб ScraperAPI не видавав застарілий кеш
+    cache_buster = int(time.time())
+    scraper_url = (
+        f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}"
+        f"&url={TARGET_URL}&country_code=ua&_t={cache_buster}"
+    )
     
+    headers = {
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache"
+    }
+
     try:
-        response = requests.get(scraper_url, timeout=30)
+        response = requests.get(scraper_url, headers=headers, timeout=30)
         if response.status_code == 200:
             return response.text
         else:
@@ -76,65 +85,42 @@ def parse_zoe_posts(html_text):
 
     today_num = now.day
     today_month = months[now.month]
-    today_str = f"{today_num} {today_month}"
+    today_str = f"{today_num} {today_month}".lower()
 
     tomorrow = now + timedelta(days=1)
-    tomorrow_str = f"{tomorrow.day} {months[tomorrow.month]}"
+    tomorrow_str = f"{tomorrow.day} {months[tomorrow.month]}".lower()
 
-    date_pattern = re.compile(
-        r"(\d{1,2}\s+(?:січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|листопада|грудня)|\d{1,2}\.\d{2}(?:\.\d{2,4})?)",
-        re.IGNORECASE,
-    )
-
-    gpv_blocks = []
-    current_block = None
+    # Парсимо записи згори донизу
+    # На сторінці ЗОЕ найновіше оновлення зазвичай йде першим
+    relevant_lines = []
+    found_today_block = False
 
     for line in lines:
-        if ("ГПВ" in line.upper() or "ГРАФІК" in line.upper()) and "ПРОМИСЛОВОСТІ" not in line.upper():
-            match_date = date_pattern.search(line)
-            if match_date:
-                if current_block:
-                    gpv_blocks.append(current_block)
-                current_block = {
-                    "header_date": match_date.group(0),
-                    "text": line
-                }
-                continue
+        line_lower = line.lower()
+        if ("гпв" in line_lower or "графік" in line_lower or "оновлено" in line_lower) and (today_str in line_lower or tomorrow_str in line_lower or f"{today_num:02d}." in line_lower or f"{today_num}." in line_lower):
+            found_today_block = True
+        
+        if found_today_block:
+            relevant_lines.append(line)
+            # Шукаємо конкретно чергу 1.2
+            if re.search(r"(?:черга\s*)?1\.2\s*:\s*[\d\s\:\–\—\-\,]+", line_lower):
+                match = re.search(r"(?:черга\s*)?1\.2\s*:\s*([\d\s\:\–\—\-\,]+)", line, re.IGNORECASE)
+                if match:
+                    raw_time = match.group(1).strip().rstrip(",")
+                    # Повертаємо знайдені години відключення
+                    display_date = f"{today_num} {months[now.month].upper()}"
+                    return display_date, f"• {raw_time}"
 
-        if current_block:
-            if "ПРОМИСЛОВОСТІ" in line.upper() or "ДО УВАГИ" in line.upper():
-                gpv_blocks.append(current_block)
-                current_block = None
-            else:
-                current_block["text"] += " " + line
+    # Якщо пробіглись по всьому тексту і знайшли чергу 1.2 в загальному масиві
+    full_text = "\n".join(lines)
+    match_fallback = re.search(r"(?:черга\s*)?1\.2\s*:\s*([\d\s\:\–\—\-\,]+)", full_text, re.IGNORECASE)
+    if match_fallback:
+        raw_time = match_fallback.group(1).strip().rstrip(",")
+        display_date = f"{today_num} {months[now.month].upper()}"
+        return display_date, f"• {raw_time}"
 
-    if current_block:
-        gpv_blocks.append(current_block)
-
-    relevant_block = None
-    for block in gpv_blocks:
-        h_date = block["header_date"].lower()
-        if str(today_num) in h_date or today_str in h_date or str(tomorrow.day) in h_date or tomorrow_str in h_date:
-            relevant_block = block
-            break
-
-    if relevant_block:
-        header_date = relevant_block["header_date"]
-        block_text = relevant_block["text"]
-
-        queue_pattern = re.compile(
-            r"(?:Черга\s*)?1\.2\s*:\s*([\d\s\:\–\—\-\,]+?)(?=(?:Черга\s*)?\d\.\d\s*:|$)",
-            re.IGNORECASE,
-        )
-        match_queue = queue_pattern.search(block_text)
-
-        if match_queue:
-            raw_time = match_queue.group(1).strip().rstrip(",")
-            return header_date, f"• {raw_time}"
-        else:
-            return header_date, "🟢 Для Черги 1.2 відключень у цьому графіку немає."
-
-    return today_str, "🟢 Відключень для населення наразі немає (актуальний ГПВ не оприлюднено)."
+    display_date = f"{today_num} {months[now.month].upper()}"
+    return display_date, "🟢 Для Черги 1.2 відключень у цьому графіку немає."
 
 def bot_loop():
     print("🚀 Скрипт моніторингу ЗОЕ через ScraperAPI запущено!", flush=True)
