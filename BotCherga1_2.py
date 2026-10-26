@@ -39,6 +39,16 @@ def send_telegram(text):
         print(f"❌ Помилка відправки в Telegram: {e}", flush=True)
         return False
 
+def normalize_text(text):
+    """Нормалізація тире та пробілів для уніфікації тексту з різних джерел"""
+    if not text:
+        return ""
+    # Заміна усіх типів тире (em-dash, en-dash тощо) на стандартний дефіс
+    text = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]", "-", text)
+    # Нормалізація пробілів
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
 def get_page(url):
     if not SCRAPER_API_KEY:
         print("⚠️ Помилка: SCRAPER_API_KEY не знайдено!", flush=True)
@@ -79,17 +89,16 @@ def extract_schedule_from_text(text):
     months = get_ukrainian_months()
     today_num = now.day
     today_month = months[now.month]
-    today_str = f"{today_num} {today_month}".lower()
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-    # Шукаємо рядки з чергою 1.2
     for line in lines:
-        line_lower = line.lower()
-        if re.search(r"(?:черга\s*)?1\.2\s*:\s*[\d\s\:\–\—\-\,]+", line_lower):
-            match = re.search(r"(?:черга\s*)?1\.2\s*:\s*([\d\s\:\–\—\-\,]+)", line, re.IGNORECASE)
+        line_norm = normalize_text(line)
+        line_lower = line_norm.lower()
+        if re.search(r"(?:черга\s*)?1\.2\s*:\s*[\d\s\:\-\,]+", line_lower):
+            match = re.search(r"(?:черга\s*)?1\.2\s*:\s*([\d\s\:\-\,]+)", line_norm, re.IGNORECASE)
             if match:
-                raw_time = match.group(1).strip().rstrip(",")
+                raw_time = normalize_text(match.group(1)).rstrip(",")
                 display_date = f"{today_num} {months[now.month].upper()}"
                 return display_date, f"• {raw_time}"
 
@@ -104,18 +113,15 @@ def parse_telegram_channel(html_text):
     if not posts:
         return None, None
 
-    # Перевіряємо останні 5 постів (від найновіших до старших)
     for post in reversed(posts[-5:]):
         text = post.get_text(separator="\n")
         text_lower = text.lower()
         
-        # Шукаємо дописи про ГПВ чи оновлення графіків
         if ("гпв" in text_lower or "графік" in text_lower or "оновлено" in text_lower or "відключен" in text_lower):
             date, schedule = extract_schedule_from_text(text)
-            if "немає" not in schedule:  # Якщо знайшли конкретні години
+            if "немає" not in schedule:
                 return date, schedule
 
-    # Якщо в останніх постах конкретних годин не знайдено
     return extract_schedule_from_text(posts[-1].get_text(separator="\n"))
 
 def parse_zoe_site(html_text):
@@ -137,8 +143,7 @@ def check_and_notify():
     if tg_html:
         tg_date, tg_schedule = parse_telegram_channel(tg_html)
         if tg_schedule and "немає" not in tg_schedule:
-            if process_schedule_data(tg_date, tg_schedule, "📢 Telegram-канал ЗОЕ", timestamp):
-                return  # Якщо було знайдене оновлення в Telegram, зберігаємо і чекаємо наступного циклу
+            process_schedule_data(tg_date, tg_schedule, "📢 Telegram-канал ЗОЕ", timestamp)
 
     # 2. Перевірка веб-сайту ЗОЕ
     print(" 🌐 Перевіряємо сайт ЗОЕ...", flush=True)
