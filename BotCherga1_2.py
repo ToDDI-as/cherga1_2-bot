@@ -40,12 +40,9 @@ def send_telegram(text):
         return False
 
 def normalize_text(text):
-    """Нормалізація тире та пробілів для уніфікації тексту з різних джерел"""
     if not text:
         return ""
-    # Заміна усіх типів тире (em-dash, en-dash тощо) на стандартний дефіс
     text = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]", "-", text)
-    # Нормалізація пробілів
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
@@ -84,45 +81,43 @@ def get_ukrainian_months():
     }
 
 def extract_schedule_from_text(text):
-    """Універсальний пошук розкладу для Черги 1.2 у довільному тексті"""
+    """Строгий пошук розкладу лише для актуальної дати"""
     now = datetime.now()
     months = get_ukrainian_months()
     today_num = now.day
     today_month = months[now.month]
+    today_str = f"{today_num} {today_month}".lower()
+    display_date = f"{today_num} {months[now.month].upper()}"
 
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines = [normalize_text(line) for line in text.splitlines() if line.strip()]
 
+    # Явна перевірка на фрази про відсутність розпоряджень / графіків
+    full_text_lower = normalize_text(text).lower()
+    if "розпорядження щодо застосування графіків" in full_text_lower and "не надходило" in full_text_lower:
+        return display_date, "🟢 Відключень для населення наразі немає (розпорядження НЕК Укренерго не надходило)."
+
+    # Шукаємо рядок із Чергою 1.2
     for line in lines:
-        line_norm = normalize_text(line)
-        line_lower = line_norm.lower()
+        line_lower = line.lower()
         if re.search(r"(?:черга\s*)?1\.2\s*:\s*[\d\s\:\-\,]+", line_lower):
-            match = re.search(r"(?:черга\s*)?1\.2\s*:\s*([\d\s\:\-\,]+)", line_norm, re.IGNORECASE)
+            match = re.search(r"(?:черга\s*)?1\.2\s*:\s*([\d\s\:\-\,]+)", line, re.IGNORECASE)
             if match:
                 raw_time = normalize_text(match.group(1)).rstrip(",")
-                display_date = f"{today_num} {months[now.month].upper()}"
                 return display_date, f"• {raw_time}"
 
-    display_date = f"{today_num} {months[now.month].upper()}"
     return display_date, "🟢 Для Черги 1.2 відключень у цьому графіку немає."
 
 def parse_telegram_channel(html_text):
-    """Парсинг веб-версії Telegram-каналу"""
+    """Парсинг веб-версії Telegram-каналу з урахуванням останнього поста"""
     soup = BeautifulSoup(html_text, "html.parser")
     posts = soup.find_all("div", class_="tgme_widget_message_text")
     
     if not posts:
         return None, None
 
-    for post in reversed(posts[-5:]):
-        text = post.get_text(separator="\n")
-        text_lower = text.lower()
-        
-        if ("гпв" in text_lower or "графік" in text_lower or "оновлено" in text_lower or "відключен" in text_lower):
-            date, schedule = extract_schedule_from_text(text)
-            if "немає" not in schedule:
-                return date, schedule
-
-    return extract_schedule_from_text(posts[-1].get_text(separator="\n"))
+    # Перевіряємо найновіший пост
+    latest_post_text = posts[-1].get_text(separator="\n")
+    return extract_schedule_from_text(latest_post_text)
 
 def parse_zoe_site(html_text):
     """Парсинг офіційного сайту ЗОЕ"""
@@ -142,8 +137,9 @@ def check_and_notify():
     tg_html = get_page(TARGET_TG_URL)
     if tg_html:
         tg_date, tg_schedule = parse_telegram_channel(tg_html)
-        if tg_schedule and "немає" not in tg_schedule:
+        if tg_schedule:
             process_schedule_data(tg_date, tg_schedule, "📢 Telegram-канал ЗОЕ", timestamp)
+            return
 
     # 2. Перевірка веб-сайту ЗОЕ
     print(" 🌐 Перевіряємо сайт ЗОЕ...", flush=True)
