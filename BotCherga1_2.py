@@ -2,7 +2,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask
 import requests
 import cloudscraper
@@ -29,9 +29,8 @@ TARGET_TG_URL = "https://t.me/s/Zaporizhzhyaoblenergo_news"
 CHECK_INTERVAL_SECONDS = 300  # Перевірка кожні 5 хвилин
 CACHE_FILE = "last_schedule_1_2.txt"
 
-# Публічні проксі для сайту ЗОЕ (якщо прямий IP блокується)
 PROXIES_LIST = [
-    None,  # Пряме підключення
+    None,
     {"http": "http://194.44.208.194:8080", "https": "http://194.44.208.194:8080"},
     {"http": "http://185.233.112.222:8080", "https": "http://185.233.112.222:8080"},
     {"http": "http://195.162.81.189:8080", "https": "http://195.162.81.189:8080"},
@@ -55,7 +54,6 @@ def normalize_text(text):
     return text.strip()
 
 def get_telegram_page():
-    """Прямий безкоштовний запит до Telegram без ScraperAPI"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
@@ -68,7 +66,6 @@ def get_telegram_page():
     return None
 
 def get_zoe_site_page():
-    """Запит до сайту ЗОЕ через cloudscraper та проксі"""
     scraper = cloudscraper.create_scraper(
         browser={"browser": "chrome", "platform": "windows", "desktop": True}
     )
@@ -94,7 +91,7 @@ def get_ukrainian_months():
     }
 
 def extract_schedule_from_text(text):
-    """Строгий пошук розкладу лише для Черги 1.2"""
+    """Універсальний парсинг Черги 1.2 з підтримкою багаторядкових графіків та 'з .. до ..'"""
     now = datetime.now()
     months = get_ukrainian_months()
     today_num = now.day
@@ -106,13 +103,36 @@ def extract_schedule_from_text(text):
 
     lines = [normalize_text(line) for line in text.splitlines() if line.strip()]
 
+    time_slots = []
+    capture = False
+
     for line in lines:
-        line_lower = line.lower()
-        if re.search(r"(?:черга\s*)?1\.2\s*:\s*[\d\s\:\-\,]+", line_lower):
-            match = re.search(r"(?:черga\s*)?1\.2\s*:\s*([\d\s\:\-\,]+)", line, re.IGNORECASE)
-            if match:
-                raw_time = normalize_text(match.group(1)).rstrip(",")
-                return display_date, f"• {raw_time}"
+        line_clean = line.replace("⚡", "").strip()
+        line_lower = line_clean.lower()
+
+        # Початок блоку Черги 1.2
+        if re.search(r"(?:черга\s*)?1\.2", line_lower):
+            capture = True
+            # Якщо години на тому ж рядку (наприклад "1.2: 09:00 - 13:00")
+            match_same_line = re.search(r"(?:черга\s*)?1\.2\s*:\s*(.+)", line_clean, re.IGNORECASE)
+            if match_same_line:
+                slot = match_same_line.group(1).strip()
+                if slot:
+                    time_slots.append(slot)
+            continue
+
+        # Зупиняємо збір, якщо дійшли до іншої черги (наприклад "Черга 2.1", "Черга 1.1")
+        if capture and re.search(r"(?:черга\s*)\d\.\d", line_lower):
+            break
+
+        # Якщо ми всередині блоку 1.2 і рядок містить години
+        if capture:
+            if re.search(r"\d{1,2}:\d{2}", line_clean):
+                time_slots.append(line_clean)
+
+    if time_slots:
+        formatted_slots = "\n".join([f"• {slot}" for slot in time_slots])
+        return display_date, formatted_slots
 
     return display_date, "🟢 Для Черги 1.2 відключень у цьому графіку немає."
 
@@ -122,8 +142,14 @@ def parse_telegram_channel(html_text):
     if not posts:
         return None, None
 
-    latest_post_text = posts[-1].get_text(separator="\n")
-    return extract_schedule_from_text(latest_post_text)
+    # Перевіряємо останні пости
+    for post in reversed(posts[-3:]):
+        text = post.get_text(separator="\n")
+        date, schedule = extract_schedule_from_text(text)
+        if "немає" not in schedule:
+            return date, schedule
+
+    return extract_schedule_from_text(posts[-1].get_text(separator="\n"))
 
 def parse_zoe_site(html_text):
     soup = BeautifulSoup(html_text, "html.parser")
@@ -137,7 +163,6 @@ def check_and_notify():
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] Перевірка джерел...", flush=True)
 
-    # 1. Перевірка Telegram-каналу (Прямий безкоштовний метод)
     print(" 📡 Перевіряємо Telegram-канал @Zaporizhzhyaoblenergo_news...", flush=True)
     tg_html = get_telegram_page()
     if tg_html:
@@ -146,7 +171,6 @@ def check_and_notify():
             if process_schedule_data(tg_date, tg_schedule, "📢 Telegram-канал ЗОЕ", timestamp):
                 return
 
-    # 2. Перевірка сайту ЗОЕ
     print(" 🌐 Перевіряємо сайт ЗОЕ...", flush=True)
     site_html = get_zoe_site_page()
     if site_html:
