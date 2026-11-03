@@ -91,7 +91,7 @@ def get_ukrainian_months():
     }
 
 def extract_schedule_from_text(text):
-    """Універсальний парсинг Черги 1.2 з підтримкою багаторядкових графіків та 'з .. до ..'"""
+    """Універсальний строгий парсинг ТІЛЬКИ Черги 1.2"""
     now = datetime.now()
     months = get_ukrainian_months()
     today_num = now.day
@@ -107,26 +107,27 @@ def extract_schedule_from_text(text):
     capture = False
 
     for line in lines:
-        line_clean = line.replace("⚡", "").strip()
+        line_clean = line.replace("⚡", "").replace("•", "").strip()
         line_lower = line_clean.lower()
 
-        # Початок блоку Черги 1.2
-        if re.search(r"(?:черга\s*)?1\.2", line_lower):
+        # 1. Початок блоку Черги 1.2
+        if re.search(r"^(?:черга\s*)?1\.2(?:\:|\s|$)", line_lower):
             capture = True
-            # Якщо години на тому ж рядку (наприклад "1.2: 09:00 - 13:00")
-            match_same_line = re.search(r"(?:черга\s*)?1\.2\s*:\s*(.+)", line_clean, re.IGNORECASE)
+            # Якщо години на тому ж рядку (наприклад "1.2: 00:00 - 03:00, 10:30 - 15:30")
+            match_same_line = re.search(r"^(?:черга\s*)?1\.2\s*:\s*(.+)", line_clean, re.IGNORECASE)
             if match_same_line:
                 slot = match_same_line.group(1).strip()
                 if slot:
                     time_slots.append(slot)
+                    break  # Якщо весь розклад в один рядок, одразу завершуємо!
             continue
 
-        # Зупиняємо збір, якщо дійшли до іншої черги (наприклад "Черга 2.1", "Черга 1.1")
-        if capture and re.search(r"(?:черга\s*)\d\.\d", line_lower):
-            break
-
-        # Якщо ми всередині блоку 1.2 і рядок містить години
+        # 2. Умова зупинки: якщо зустріли ІНШУ чергу (наприклад "2.1:", "Черга 2.1", "1.1:") або сторонній текст
         if capture:
+            if re.search(r"^(?:черга\s*)?\d\.\d(?:\:|\s|$)", line_lower) or not re.search(r"\d{1,2}:\d{2}", line_clean):
+                break
+            
+            # Якщо це продовжуються години для 1.2 (багаторядковий формат "з .. до ..")
             if re.search(r"\d{1,2}:\d{2}", line_clean):
                 time_slots.append(line_clean)
 
