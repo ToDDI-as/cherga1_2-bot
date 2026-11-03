@@ -2,7 +2,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask
 import requests
 import cloudscraper
@@ -90,14 +90,32 @@ def get_ukrainian_months():
         9: "вересня", 10: "жовтня", 11: "листопада", 12: "грудня"
     }
 
-def extract_schedule_from_text(text):
-    """Універсальний строгий парсинг ТІЛЬКИ Черги 1.2"""
+def detect_date_from_text(text):
+    """Динамічне визначення дати з тексту публікації"""
     now = datetime.now()
     months = get_ukrainian_months()
-    today_num = now.day
-    display_date = f"{today_num} {months[now.month].upper()}"
+    text_lower = text.lower()
 
+    # Перевірка на "завтра"
+    if "завтра" in text_lower:
+        target_dt = now + timedelta(days=1)
+        return f"{target_dt.day} {months[target_dt.month].upper()}"
+
+    # Пошук конкретного числа (наприклад "04 листопада", "4 листопада")
+    match_date = re.search(r"(\d{1,2})\s+(січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|листопада|грудня)", text_lower)
+    if match_date:
+        day_num = int(match_date.group(1))
+        month_str = match_date.group(2).upper()
+        return f"{day_num} {month_str}"
+
+    # За замовчуванням — сьогоднішній день
+    return f"{now.day} {months[now.month].upper()}"
+
+def extract_schedule_from_text(text):
+    """Універсальний строгий парсинг Черги 1.2 з точним визначенням дати"""
+    display_date = detect_date_from_text(text)
     full_text_lower = normalize_text(text).lower()
+
     if "розпорядження щодо застосування графіків" in full_text_lower and "не надходило" in full_text_lower:
         return display_date, "🟢 Відключень для населення наразі немає (розпорядження НЕК Укренерго не надходило)."
 
@@ -113,21 +131,19 @@ def extract_schedule_from_text(text):
         # 1. Початок блоку Черги 1.2
         if re.search(r"^(?:черга\s*)?1\.2(?:\:|\s|$)", line_lower):
             capture = True
-            # Якщо години на тому ж рядку (наприклад "1.2: 00:00 - 03:00, 10:30 - 15:30")
             match_same_line = re.search(r"^(?:черга\s*)?1\.2\s*:\s*(.+)", line_clean, re.IGNORECASE)
             if match_same_line:
                 slot = match_same_line.group(1).strip()
                 if slot:
                     time_slots.append(slot)
-                    break  # Якщо весь розклад в один рядок, одразу завершуємо!
+                    break
             continue
 
-        # 2. Умова зупинки: якщо зустріли ІНШУ чергу (наприклад "2.1:", "Черга 2.1", "1.1:") або сторонній текст
+        # 2. Межа зупинки (інша черга чи сторонній текст)
         if capture:
             if re.search(r"^(?:черга\s*)?\d\.\d(?:\:|\s|$)", line_lower) or not re.search(r"\d{1,2}:\d{2}", line_clean):
                 break
             
-            # Якщо це продовжуються години для 1.2 (багаторядковий формат "з .. до ..")
             if re.search(r"\d{1,2}:\d{2}", line_clean):
                 time_slots.append(line_clean)
 
@@ -143,7 +159,6 @@ def parse_telegram_channel(html_text):
     if not posts:
         return None, None
 
-    # Перевіряємо останні пости
     for post in reversed(posts[-3:]):
         text = post.get_text(separator="\n")
         date, schedule = extract_schedule_from_text(text)
