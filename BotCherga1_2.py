@@ -90,25 +90,28 @@ def get_ukrainian_months():
         9: "вересня", 10: "жовтня", 11: "листопада", 12: "грудня"
     }
 
-def detect_date_from_text(text):
-    """Динамічне визначення дати з тексту публікації"""
-    now = datetime.now()
+def detect_date_from_text(text, post_date=None):
+    """Строге визначення дати з тексту допису з пріоритетом точної дати"""
+    now = post_date if post_date else datetime.now()
     months = get_ukrainian_months()
     text_lower = text.lower()
 
-    # Перевірка на "завтра"
-    if "завтра" in text_lower:
-        target_dt = now + timedelta(days=1)
-        return f"{target_dt.day} {months[target_dt.month].upper()}"
-
-    # Пошук конкретного числа (наприклад "04 листопада", "4 листопада")
-    match_date = re.search(r"(\d{1,2})\s+(січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|листопада|грудня)", text_lower)
+    # 1. Пріоритет №1: Шукаємо точне число і місяць у тексті (наприклад "04 листопада", "4 листопада")
+    match_date = re.search(
+        r"(\d{1,2})\s+(січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|листопада|грудня)",
+        text_lower
+    )
     if match_date:
         day_num = int(match_date.group(1))
         month_str = match_date.group(2).upper()
         return f"{day_num} {month_str}"
 
-    # За замовчуванням — сьогоднішній день
+    # 2. Пріоритет №2: Якщо точного числа немає, але є слово "завтра" (разом із датою поста)
+    if "завтра" in text_lower:
+        target_dt = now + timedelta(days=1)
+        return f"{target_dt.day} {months[target_dt.month].upper()}"
+
+    # 3. Дефолт — дата публікації/перевірки
     return f"{now.day} {months[now.month].upper()}"
 
 def extract_schedule_from_text(text):
