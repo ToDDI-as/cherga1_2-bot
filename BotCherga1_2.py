@@ -118,6 +118,7 @@ def detect_date_from_text(text, post_date=None):
     return f"{now.day} {months[now.month].upper()}"
 
 def extract_schedule_from_text(text):
+    """Універсальний строгий парсинг Черги 1.2 для комбінованих та багаторядкових графіків"""
     display_date = detect_date_from_text(text)
     full_text_lower = normalize_text(text).lower()
 
@@ -133,22 +134,26 @@ def extract_schedule_from_text(text):
         line_clean = line.replace("⚡", "").replace("•", "").strip()
         line_lower = line_clean.lower()
 
+        # 1. Початок блоку Черги 1.2
         if re.search(r"^(?:черга\s*)?1\.2(?:\:|\s|$)", line_lower):
             capture = True
+            # Якщо є години на цьому ж рядку (наприклад "Черга 1.2: 00:00 - 02:00;")
             match_same_line = re.search(r"^(?:черга\s*)?1\.2\s*:\s*(.+)", line_clean, re.IGNORECASE)
             if match_same_line:
-                slot = match_same_line.group(1).strip()
+                slot = match_same_line.group(1).strip().rstrip(";").rstrip(",")
                 if slot:
                     time_slots.append(slot)
-                    break
             continue
 
+        # 2. Умова зупинки: якщо дійшли до іншої черги (наприклад "Черга 2.1:", "2.1:") або стороннього тексту
         if capture:
             if re.search(r"^(?:черга\s*)?\d\.\d(?:\:|\s|$)", line_lower) or not re.search(r"\d{1,2}:\d{2}", line_clean):
                 break
-            
+
+            # Якщо це продовження годин для 1.2 на наступних рядках
             if re.search(r"\d{1,2}:\d{2}", line_clean):
-                time_slots.append(line_clean)
+                slot_clean = line_clean.rstrip(";").rstrip(",")
+                time_slots.append(slot_clean)
 
     if time_slots:
         formatted_slots = "\n".join([f"• {slot}" for slot in time_slots])
