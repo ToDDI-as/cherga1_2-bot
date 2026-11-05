@@ -2,7 +2,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from flask import Flask
 import requests
 import cloudscraper
@@ -35,6 +35,11 @@ PROXIES_LIST = [
     {"http": "http://185.233.112.222:8080", "https": "http://185.233.112.222:8080"},
     {"http": "http://195.162.81.189:8080", "https": "http://195.162.81.189:8080"},
 ]
+
+def get_kyiv_now():
+    """Отримання поточного київського часу (UTC+2)"""
+    kyiv_tz = timezone(timedelta(hours=2))
+    return datetime.now(kyiv_tz)
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -91,12 +96,11 @@ def get_ukrainian_months():
     }
 
 def detect_date_from_text(text, post_date=None):
-    """Строге визначення дати з тексту допису з пріоритетом точної дати"""
-    now = post_date if post_date else datetime.now()
+    now = post_date if post_date else get_kyiv_now()
     months = get_ukrainian_months()
     text_lower = text.lower()
 
-    # 1. Пріоритет №1: Шукаємо точне число і місяць у тексті (наприклад "04 листопада", "4 листопада")
+    # 1. Пріоритет точної дати у тексті (наприклад "05 листопада")
     match_date = re.search(
         r"(\d{1,2})\s+(січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|листопада|грудня)",
         text_lower
@@ -106,16 +110,14 @@ def detect_date_from_text(text, post_date=None):
         month_str = match_date.group(2).upper()
         return f"{day_num} {month_str}"
 
-    # 2. Пріоритет №2: Якщо точного числа немає, але є слово "завтра" (разом із датою поста)
+    # 2. Пріоритет слова "завтра"
     if "завтра" in text_lower:
         target_dt = now + timedelta(days=1)
         return f"{target_dt.day} {months[target_dt.month].upper()}"
 
-    # 3. Дефолт — дата публікації/перевірки
     return f"{now.day} {months[now.month].upper()}"
 
 def extract_schedule_from_text(text):
-    """Універсальний строгий парсинг Черги 1.2 з точним визначенням дати"""
     display_date = detect_date_from_text(text)
     full_text_lower = normalize_text(text).lower()
 
@@ -131,7 +133,6 @@ def extract_schedule_from_text(text):
         line_clean = line.replace("⚡", "").replace("•", "").strip()
         line_lower = line_clean.lower()
 
-        # 1. Початок блоку Черги 1.2
         if re.search(r"^(?:черга\s*)?1\.2(?:\:|\s|$)", line_lower):
             capture = True
             match_same_line = re.search(r"^(?:черга\s*)?1\.2\s*:\s*(.+)", line_clean, re.IGNORECASE)
@@ -142,7 +143,6 @@ def extract_schedule_from_text(text):
                     break
             continue
 
-        # 2. Межа зупинки (інша черга чи сторонній текст)
         if capture:
             if re.search(r"^(?:черга\s*)?\d\.\d(?:\:|\s|$)", line_lower) or not re.search(r"\d{1,2}:\d{2}", line_clean):
                 break
@@ -179,7 +179,7 @@ def parse_zoe_site(html_text):
     return extract_schedule_from_text(text_full)
 
 def check_and_notify():
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = get_kyiv_now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] Перевірка джерел...", flush=True)
 
     print(" 📡 Перевіряємо Telegram-канал @Zaporizhzhyaoblenergo_news...", flush=True)
