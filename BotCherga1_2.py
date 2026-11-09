@@ -161,19 +161,36 @@ def extract_schedule_from_text(text):
 
     return display_date, "🟢 Для Черги 1.2 відключень у цьому графіку немає."
 
+def is_schedule_post(text):
+    """Перевіряє, чи є текст реальним графіком або повідомленням про його відсутність"""
+    text_lower = normalize_text(text).lower()
+    
+    # Ознака 1: Явна фраза про відсутність/скасування ГПВ
+    if "розпорядження щодо застосування графіків" in text_lower and "не надходило" in text_lower:
+        return True
+    if "графіки погодинних відключень" in text_lower and ("скасовано" in text_lower or "не застосовуватимуться" in text_lower):
+        return True
+        
+    # Ознака 2: Наявність у тексті хоча б однієї черги (наприклад 1.1, 2.2, 6.1)
+    if re.search(r"(?:черга\s*)?[1-6]\.[1-2](?:\:|\s|$)", text_lower):
+        return True
+        
+    return False
+
 def parse_telegram_channel(html_text):
     soup = BeautifulSoup(html_text, "html.parser")
     posts = soup.find_all("div", class_="tgme_widget_message_text")
     if not posts:
         return None, None
 
+    # Перевіряємо останні 3 пости від найновішого до старішого
     for post in reversed(posts[-3:]):
         text = post.get_text(separator="\n")
-        date, schedule = extract_schedule_from_text(text)
-        if "немає" not in schedule:
-            return date, schedule
+        if is_schedule_post(text):
+            return extract_schedule_from_text(text)
 
-    return extract_schedule_from_text(posts[-1].get_text(separator="\n"))
+    # Якщо серед останніх 3 постів немає жодного графіка — ігноруємо
+    return None, None
 
 def parse_zoe_site(html_text):
     soup = BeautifulSoup(html_text, "html.parser")
