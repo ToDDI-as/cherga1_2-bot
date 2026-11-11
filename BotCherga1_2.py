@@ -54,7 +54,11 @@ def send_telegram(text):
 def normalize_text(text):
     if not text:
         return ""
+    # Усі види тире замінюємо на стандартний дефіс
     text = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]", "-", text)
+    # Зводимо "з 17:30 до 22:30" до "17:30 - 22:30"
+    text = re.sub(r"\bз\s*(\d{1,2}:\d{2})\s*до\s*(\d{1,2}:\d{2})", r"\1 - \2", text, flags=re.IGNORECASE)
+    # Нормалізуємо пробіли
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
