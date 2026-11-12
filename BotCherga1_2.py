@@ -100,25 +100,35 @@ def get_ukrainian_months():
     }
 
 def detect_date_from_text(text, post_date=None):
+    """Строге визначення дати з підтримкою словесного та числового (ДД.ММ) форматів"""
     now = post_date if post_date else get_kyiv_now()
     months = get_ukrainian_months()
     text_lower = text.lower()
 
-    # 1. Пріоритет точної дати у тексті (наприклад "05 листопада")
-    match_date = re.search(
+    # 1. Словесний формат: "11 листопада", "04 листопада"
+    match_word_date = re.search(
         r"(\d{1,2})\s+(січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|листопада|грудня)",
         text_lower
     )
-    if match_date:
-        day_num = int(match_date.group(1))
-        month_str = match_date.group(2).upper()
+    if match_word_date:
+        day_num = int(match_word_date.group(1))
+        month_str = match_word_date.group(2).upper()
         return f"{day_num} {month_str}"
 
-    # 2. Пріоритет слова "завтра"
+    # 2. Числовий формат: "11.11.2026", "11.11", "11/11" (ігноруємо час виду 11:11)
+    match_num_date = re.search(r"\b(\d{1,2})[\.\/](\d{1,2})(?:[\.\/]\d{2,4})?\b", text_lower)
+    if match_num_date:
+        day_num = int(match_num_date.group(1))
+        month_num = int(match_num_date.group(2))
+        if 1 <= day_num <= 31 and 1 <= month_num <= 12:
+            return f"{day_num} {months[month_num].upper()}"
+
+    # 3. Слово "завтра"
     if "завтра" in text_lower:
         target_dt = now + timedelta(days=1)
         return f"{target_dt.day} {months[target_dt.month].upper()}"
 
+    # 4. Дефолт — поточна дата
     return f"{now.day} {months[now.month].upper()}"
 
 def extract_schedule_from_text(text):
