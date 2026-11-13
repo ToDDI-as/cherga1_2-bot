@@ -28,12 +28,12 @@ TARGET_SITE_URL = "https://www.zoe.com.ua/outage/"
 TARGET_TG_URL = "https://t.me/s/Zaporizhzhyaoblenergo_news"
 
 CHECK_INTERVAL_SECONDS = 300  # Перевірка кожні 5 хвилин
-CACHE_FILE = "schedule_history_1_2.json"
+CACHE_FILE = "schedule_state_1_2.json"
+
+KYIV_TZ = timezone(timedelta(hours=2))
 
 def get_kyiv_now():
-    """Поточний київський час (UTC+2)"""
-    kyiv_tz = timezone(timedelta(hours=2))
-    return datetime.now(kyiv_tz)
+    return datetime.now(KYIV_TZ)
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -219,15 +219,24 @@ def parse_telegram_channel(html_text):
         text = text_div.get_text(separator="\n")
         if is_schedule_post(text):
             display_date, date_obj, schedule = extract_schedule_from_text(text)
-            # Витягуємо унікальний ID поста (наприклад "Zaporizhzhyaoblenergo_news/12345")
-            msg_div = msg_wrap.find("div", class_="tgme_widget_message")
-            post_id = msg_div.get("data-post", "") if msg_div else ""
+
+            # Витягуємо точний час публікації поста з <time datetime="...">
+            published_dt = get_kyiv_now()
+            time_tag = msg_wrap.find("time", attrs={"datetime": True})
+            if time_tag:
+                try:
+                    raw_iso = time_tag["datetime"].replace("Z", "+00:00")
+                    published_dt = datetime.fromisoformat(raw_iso).astimezone(KYIV_TZ)
+                except Exception:
+                    pass
+
             return {
                 "display_date": display_date,
                 "date_obj": date_obj,
+                "published_ts": published_dt.timestamp(),
+                "published_str": published_dt.strftime("%Y-%m-%d %H:%M"),
                 "schedule": schedule,
-                "source": "📢 Telegram-канал ЗОЕ",
-                "source_key": f"tg:{post_id}" if post_id else "tg"
+                "source": "📢 Telegram-канал ЗОЕ"
             }
     return None
 
@@ -239,34 +248,41 @@ def parse_zoe_site(html_text):
     text_full = soup.get_text(separator="\n")
     if is_schedule_post(text_full):
         display_date, date_obj, schedule = extract_schedule_from_text(text_full)
-        # Витягуємо мітку часу оновлення з заголовка сайту (наприклад "оновлено 11:53")
-        upd_match = re.search(r"оновлено\s*(\d{1,2}:\d{2})", text_full.lower())
-        upd_tag = upd_match.group(1) if upd_match else ""
+        now_kyiv = get_kyiv_now()
+
+        # Витягуємо час оновлення із заголовка сайту, наприклад "(оновлено 11:53)"
+        published_dt = now_kyiv
+        upd_match = re.search(r"оновлено\s*(\d{1,2}):(\d{2})", text_full.lower())
+        if upd_match:
+            h, m = int(upd_match.group(1)), int(upd_match.group(2))
+            candidate_dt = now_kyiv.replace(hour=h, minute=m, second=0, microsecond=0)
+            # Якщо час на сайті більший за поточний (наприклад 23:50, а зараз 00:05) — це вчорашній вечір
+            if candidate_dt > now_kyiv + timedelta(minutes=10):
+                candidate_dt -= timedelta(days=1)
+            published_dt = candidate_dt
+
         return {
             "display_date": display_date,
             "date_obj": date_obj,
+            "published_ts": published_dt.timestamp(),
+            "published_str": published_dt.strftime("%Y-%m-%d %H:%M"),
             "schedule": schedule,
-            "source": "🌐 Сайт ЗОЕ",
-            "source_key": f"site:{upd_tag}" if upd_tag else "site"
+            "source": "🌐 Сайт ЗОЕ"
         }
     return None
 
-def load_history():
-    """Завантажує історію: {'max_date': 'YYYY-MM-DD', 'sent_schedules': [...], 'seen_sources': [...]}"""
+def load_state():
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             pass
-    return {"max_date": "", "sent_schedules": [], "seen_sources": []}
+    return {"max_date": "", "latest_published_ts": 0, "last_payload": ""}
 
-def save_history(history):
-    # Зберігаємо лише останні 15 записів, щоб файл не розростався
-    history["sent_schedules"] = history["sent_schedules"][-15:]
-    history["seen_sources"] = history["seen_sources"][-15:]
+def save_state(state):
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
+        json.dump(state, f, ensure_ascii=False, indent=2)
 
 def check_and_notify():
     timestamp = get_kyiv_now().strftime("%Y-%m-%d %H:%M:%S")
@@ -290,51 +306,56 @@ def check_and_notify():
         print("Актуальних графіків у джерелах не знайдено.", flush=True)
         return
 
-    # Сортуємо за датою графіка (найновіша дата перша), при рівній даті — пріоритет сайту ЗОЕ
-    candidates.sort(key=lambda x: (x["date_obj"], 1 if "Сайт" in x["source"] else 0), reverse=True)
+    # Обираємо джерело з найновішою датою графіка та найсвіжішим часом публікації
+    candidates.sort(key=lambda x: (x["date_obj"], x["published_ts"]), reverse=True)
+    best = candidates[0]
 
-    history = load_history()
-    max_date_str = history.get("max_date", "")
+    state = load_state()
+    max_date_str = state.get("max_date", "")
     max_date_obj = datetime.strptime(max_date_str, "%Y-%m-%d").date() if max_date_str else None
+    latest_pub_ts = state.get("latest_published_ts", 0)
+    last_payload = state.get("last_payload", "")
 
-    for cand in candidates:
-        cand_date_str = cand["date_obj"].strftime("%Y-%m-%d")
-        schedule_fingerprint = f"{cand_date_str} | {cand['schedule']}".strip()
-        source_fingerprint = f"{cand_date_str} | {cand['source_key']} | {cand['schedule']}".strip()
+    cand_date_str = best["date_obj"].strftime("%Y-%m-%d")
+    new_payload = f"{cand_date_str} | {best['schedule']}".strip()
 
-        # 1. Захист від відкату на стару календарну дату
-        if max_date_obj and cand["date_obj"] < max_date_obj:
-            continue
+    # 1. Захист від старішої дати
+    if max_date_obj and best["date_obj"] < max_date_obj:
+        print(f"Ігноруємо стару дату {best['display_date']}.", flush=True)
+        return
 
-        # 2. Якщо цей точний графік (дата + години) ВЖЕ надсилався сьогодні раніше — пропускаємо!
-        # Це повністю виключає повернення до ранкового графіка 07:00 після виходу денного оновлення на сайті.
-        if schedule_fingerprint in history["sent_schedules"]:
-            continue
+    # 2. Захист від старішої публікації за ту саму дату (наприклад, пост о 07:05 після оновлення сайту об 11:53)
+    if max_date_obj and best["date_obj"] == max_date_obj and best["published_ts"] < latest_pub_ts - 60:
+        print(f"Ігноруємо старішу публікацію ({best['source']} від {best['published_str']}).", flush=True)
+        return
 
-        # 3. Якщо конкретно це джерело з цією міткою вже оброблялося — пропускаємо
-        if source_fingerprint in history["seen_sources"]:
-            continue
-
-        print(f"⚡ Новий графік ({cand['source']})! Відправляємо в Telegram...", flush=True)
+    # 3. Перевірка, чи змінилися самі години для Черги 1.2
+    if new_payload != last_payload:
+        print(f"⚡ Новий графік ({best['source']} від {best['published_str']})! Відправляємо...", flush=True)
         msg = (
             f"⚡ <b>ОНОВЛЕННЯ ГРАФІКА ЗОЕ</b>\n"
-            f"📅 <b>Графік на дату:</b> <u>{cand['display_date']}</u>\n"
-            f"ℹ️ <b>Джерело:</b> {cand['source']}\n"
+            f"📅 <b>Графік на дату:</b> <u>{best['display_date']}</u>\n"
+            f"ℹ️ <b>Джерело:</b> {best['source']}\n"
             f"🕒 <i>Отримано: {timestamp}</i>\n\n"
             f"📍 <b>Черга 1.2:</b>\n"
-            f"{cand['schedule']}"
+            f"{best['schedule']}"
         )
         if send_telegram(msg):
-            if not max_date_obj or cand["date_obj"] > max_date_obj:
-                history["max_date"] = cand_date_str
-                max_date_obj = cand["date_obj"]
-            history["sent_schedules"].append(schedule_fingerprint)
-            history["seen_sources"].append(source_fingerprint)
-            save_history(history)
-            print("✅ Збережено в історію.", flush=True)
-            break  # Надсилаємо одне найактуальніше оновлення за цикл
+            save_state({
+                "max_date": cand_date_str,
+                "latest_published_ts": best["published_ts"],
+                "last_payload": new_payload
+            })
+            print("✅ Стан оновлено.", flush=True)
     else:
-        print("Нових невідправлених графіків немає.", flush=True)
+        # Навіть якщо години для 1.2 не змінились, оновлюємо мітку часу публікації, щоб не відкотитися назад
+        if best["published_ts"] > latest_pub_ts:
+            save_state({
+                "max_date": cand_date_str,
+                "latest_published_ts": best["published_ts"],
+                "last_payload": last_payload
+            })
+        print(f"Змін у графіку немає ({best['source']}).", flush=True)
 
 def bot_loop():
     print("🚀 Безкоштовний автономний моніторинг ЗОЕ запущено!", flush=True)
