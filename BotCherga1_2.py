@@ -256,16 +256,34 @@ def parse_telegram_channel(html_text):
 
 def parse_zoe_site(html_text):
     soup = BeautifulSoup(html_text, "html.parser")
-    for script in soup(["script", "style"]):
+    for script in soup(["script", "style", "header", "footer", "nav"]):
         script.decompose()
 
     text_full = soup.get_text(separator="\n")
-    if not is_schedule_post(text_full):
+    lines = [line.strip() for line in text_full.splitlines() if line.strip()]
+
+    # Знаходимо початок найсвіжішого (верхнього) оголошення про ГПВ
+    start_idx = 0
+    for i, line in enumerate(lines):
+        if re.search(r"(?:оновлено\s*гпв|графік\s*погодинних|за\s*вказівкою\s*нек)", line.lower()):
+            start_idx = i
+            break
+
+    # Беремо ТІЛЬКИ перший блок графіка (зупиняємося, якщо нижче йде інший заголовок про ГПВ/архів)
+    block_lines = []
+    for line in lines[start_idx:]:
+        if len(block_lines) > 3 and re.search(r"^(?:оновлено\s*гпв|графік\s*погодинних|за\s*вказівкою\s*нек|архів)", line.lower()):
+            break
+        block_lines.append(line)
+
+    first_block_text = "\n".join(block_lines)
+
+    if not is_schedule_post(first_block_text):
         return []
 
     now_kyiv = get_kyiv_now()
     published_dt = now_kyiv
-    upd_match = re.search(r"оновлено\s*(\d{1,2}):(\d{2})", text_full.lower())
+    upd_match = re.search(r"оновлено\s*(\d{1,2}):(\d{2})", first_block_text.lower())
     if upd_match:
         h, m = int(upd_match.group(1)), int(upd_match.group(2))
         candidate_dt = now_kyiv.replace(hour=h, minute=m, second=0, microsecond=0)
@@ -273,7 +291,7 @@ def parse_zoe_site(html_text):
             candidate_dt -= timedelta(days=1)
         published_dt = candidate_dt
 
-    display_date, date_obj, schedule = extract_schedule_from_text(text_full, published_dt)
+    display_date, date_obj, schedule = extract_schedule_from_text(first_block_text, published_dt)
     return [{
         "display_date": display_date,
         "date_obj": date_obj,
