@@ -90,9 +90,13 @@ def get_zoe_site_page():
         "Pragma": "no-cache"
     }
 
+    def is_valid_zoe_html(html):
+        html_lower = html.lower()
+        return "гпв" in html_lower or "черг" in html_lower or "відключен" in html_lower
+
     try:
         response = scraper.get(TARGET_SITE_URL, headers=headers, timeout=15)
-        if response.status_code == 200 and "1.2" in response.text:
+        if response.status_code == 200 and is_valid_zoe_html(response.text):
             return response.text
     except Exception:
         pass
@@ -100,7 +104,7 @@ def get_zoe_site_page():
     for proxy in fetch_fresh_proxies():
         try:
             response = scraper.get(TARGET_SITE_URL, headers=headers, timeout=10, proxies=proxy)
-            if response.status_code == 200 and "1.2" in response.text:
+            if response.status_code == 200 and is_valid_zoe_html(response.text):
                 return response.text
         except Exception:
             continue
