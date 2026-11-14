@@ -36,22 +36,55 @@ KYIV_TZ = timezone(timedelta(hours=2))
 def get_kyiv_now():
     return datetime.now(KYIV_TZ)
 
+def update_pinned_state_board(schedule_text):
+    """Тихо оновлює текст уже закріпленого повідомлення (без сервісних повідомлень про закріплення)"""
+    try:
+        chat_resp = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getChat",
+            params={"chat_id": CHAT_ID},
+            timeout=10
+        )
+        pinned = chat_resp.json().get("result", {}).get("pinned_message") if chat_resp.ok else None
+
+        if pinned and "message_id" in pinned:
+            # Редагуємо вже закріплене повідомлення — це НЕ викликає сповіщень і сервісних рядків!
+            requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                json={
+                    "chat_id": CHAT_ID,
+                    "message_id": pinned["message_id"],
+                    "text": schedule_text,
+                    "parse_mode": "HTML"
+                },
+                timeout=10
+            )
+        else:
+            # Якщо закріпленого повідомлення ще немає — створюємо та закріплюємо один раз
+            send_resp = requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={"chat_id": CHAT_ID, "text": schedule_text, "parse_mode": "HTML"},
+                timeout=10
+            )
+            if send_resp.ok:
+                msg_id = send_resp.json().get("result", {}).get("message_id")
+                if msg_id:
+                    requests.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage",
+                        json={"chat_id": CHAT_ID, "message_id": msg_id, "disable_notification": True},
+                        timeout=10
+                    )
+    except Exception as e:
+        print(f"⚠️ Помилка оновлення закріпленого стану: {e}", flush=True)
+
 def send_telegram(text, pin=True):
-    """Надсилає повідомлення та безшумно закріплює його як резервну пам'ять"""
+    """Надсилає чисте повідомлення користувачу та тихо оновлює закріплений стан"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
     try:
         response = requests.post(url, json=payload, timeout=10)
         if response.ok:
-            data = response.json()
-            msg_id = data.get("result", {}).get("message_id")
-            if pin and msg_id:
-                pin_url = f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage"
-                requests.post(
-                    pin_url,
-                    json={"chat_id": CHAT_ID, "message_id": msg_id, "disable_notification": True},
-                    timeout=10
-                )
+            if pin:
+                update_pinned_state_board(text)
             return True
         return False
     except Exception as e:
