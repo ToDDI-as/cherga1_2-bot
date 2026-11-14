@@ -28,7 +28,7 @@ TARGET_SITE_URL = "https://www.zoe.com.ua/outage/"
 TARGET_TG_URL = "https://t.me/s/Zaporizhzhyaoblenergo_news"
 
 CHECK_INTERVAL_SECONDS = 300  # Перевірка кожні 5 хвилин
-MAX_POST_AGE_MINUTES = 45     # Ігноруємо публікації, старші за 45 хвилин (захист від старих постів при рестарті)
+MAX_POST_AGE_MINUTES = 45     # Ігноруємо публікації, старші за 45 хвилин
 CACHE_FILE = "schedules_by_date_1_2.json"
 
 KYIV_TZ = timezone(timedelta(hours=2))
@@ -36,12 +36,24 @@ KYIV_TZ = timezone(timedelta(hours=2))
 def get_kyiv_now():
     return datetime.now(KYIV_TZ)
 
-def send_telegram(text):
+def send_telegram(text, pin=True):
+    """Надсилає повідомлення та безшумно закріплює його як резервну пам'ять"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
     try:
         response = requests.post(url, json=payload, timeout=10)
-        return response.ok
+        if response.ok:
+            data = response.json()
+            msg_id = data.get("result", {}).get("message_id")
+            if pin and msg_id:
+                pin_url = f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage"
+                requests.post(
+                    pin_url,
+                    json={"chat_id": CHAT_ID, "message_id": msg_id, "disable_notification": True},
+                    timeout=10
+                )
+            return True
+        return False
     except Exception as e:
         print(f"❌ Помилка відправки в Telegram: {e}", flush=True)
         return False
@@ -126,7 +138,6 @@ def detect_date_from_text(text, post_dt):
     text_lower = text.lower()
     base_date = post_dt.date()
 
-    # 1. Словесний формат: "15 листопада"
     match_word = re.search(
         r"(\d{1,2})\s+(січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|листопада|грудня)",
         text_lower
@@ -142,7 +153,6 @@ def detect_date_from_text(text, post_dt):
         except ValueError:
             pass
 
-    # 2. Числовий формат: "15.11.2026", "15.11"
     match_num = re.search(r"\b(\d{1,2})[\.\/](\d{1,2})(?:[\.\/](\d{2,4}))?\b", text_lower)
     if match_num:
         day_num = int(match_num.group(1))
@@ -155,13 +165,45 @@ def detect_date_from_text(text, post_dt):
             except ValueError:
                 pass
 
-    # 3. Відносне слово "завтра"
     if re.search(r"\bзавтра\b", text_lower):
         target_dt = base_date + timedelta(days=1)
         return f"{target_dt.day} {months[target_dt.month].upper()}", target_dt
 
-    # 4. Дефолт — дата виходу допису
     return f"{base_date.day} {months[base_date.month].upper()}", base_date
+
+def restore_state_from_pinned():
+    """Відновлює стан із закріпленого повідомлення в Telegram після рестарту Render"""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChat"
+    try:
+        resp = requests.get(url, params={"chat_id": CHAT_ID}, timeout=10)
+        if not resp.ok:
+            return {}
+        pinned = resp.json().get("result", {}).get("pinned_message")
+        if not pinned or "text" not in pinned:
+            return {}
+
+        pinned_text = pinned["text"]
+        now_kyiv = get_kyiv_now()
+
+        # Витягуємо дату з рядка "Графік на дату: 15 ЛИСТОПАДА"
+        date_match = re.search(r"Графік на дату:\s*(.+)", pinned_text)
+        # Витягуємо блок годин після "Черга 1.2:"
+        sched_match = re.search(r"Черга 1\.2:\s*\n(.+)", pinned_text, re.DOTALL)
+
+        if date_match and sched_match:
+            _, date_obj = detect_date_from_text(date_match.group(1), now_kyiv)
+            schedule_str = sched_match.group(1).strip()
+            d_str = date_obj.strftime("%Y-%m-%d")
+            print(f"♻️ Відновлено пам'ять із закріпленого повідомлення за {d_str}!", flush=True)
+            return {
+                d_str: {
+                    "latest_ts": 0,  # Дозволяє прийняти новіший графік, якщо години зміняться
+                    "schedule": schedule_str
+                }
+            }
+    except Exception as e:
+        print(f"⚠️ Не вдалося відновити стан із закріпленого повідомлення: {e}", flush=True)
+    return {}
 
 def is_schedule_post(text):
     text_lower = normalize_text(text).lower()
@@ -237,7 +279,6 @@ def parse_telegram_channel(html_text):
             except Exception:
                 pass
 
-        # Перевіряємо вік поста: якщо він вийшов понад MAX_POST_AGE_MINUTES хвилин тому — ігноруємо!
         age_minutes = (now_kyiv - published_dt).total_seconds() / 60.0
         if age_minutes > MAX_POST_AGE_MINUTES:
             continue
@@ -292,7 +333,6 @@ def parse_zoe_site(html_text):
             candidate_dt -= timedelta(days=1)
         published_dt = candidate_dt
 
-    # Якщо на сайті вказано час оновлення "(оновлено HH:MM)" і минуло більше MAX_POST_AGE_MINUTES хвилин — ігноруємо старе оновлення
     if has_explicit_time:
         age_minutes = (now_kyiv - published_dt).total_seconds() / 60.0
         if age_minutes > MAX_POST_AGE_MINUTES:
@@ -315,7 +355,11 @@ def load_state_by_date():
                 return json.load(f)
         except Exception:
             pass
-    return {}
+    # Якщо локальний кеш зник після рестарту Render — відновлюємо із закріпленого повідомлення
+    restored = restore_state_from_pinned()
+    if restored:
+        save_state_by_date(restored, get_kyiv_now().date())
+    return restored
 
 def save_state_by_date(state, today_obj):
     today_str = today_obj.strftime("%Y-%m-%d")
@@ -378,7 +422,7 @@ def check_and_notify():
                 f"📍 <b>Черга 1.2:</b>\n"
                 f"{cand['schedule']}"
             )
-            if send_telegram(msg):
+            if send_telegram(msg, pin=True):
                 state[d_str] = {
                     "latest_ts": cand["published_ts"],
                     "schedule": cand["schedule"]
