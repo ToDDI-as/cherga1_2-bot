@@ -326,7 +326,7 @@ def extract_schedule_from_text(text, post_dt):
 
     lines = [normalize_text(line) for line in text.splitlines() if line.strip()]
 
-    time_slots = []
+    raw_intervals = []
     capture = False
 
     for line in lines:
@@ -337,20 +337,26 @@ def extract_schedule_from_text(text, post_dt):
             capture = True
             match_same_line = re.search(r"^(?:черга\s*)?1\.2\s*:\s*(.+)", line_clean, re.IGNORECASE)
             if match_same_line:
-                slot = match_same_line.group(1).strip().rstrip(";").rstrip(",")
-                if slot:
-                    time_slots.append(slot)
+                # Витягуємо всі пари "HH:MM - HH:MM" навіть якщо вони через кому/крапку з комою
+                found = re.findall(r"\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}", match_same_line.group(1))
+                raw_intervals.extend(found)
             continue
 
         if capture:
             if re.search(r"^(?:черга\s*)?\d\.\d(?:\:|\s|$)", line_lower) or not re.search(r"\d{1,2}:\d{2}", line_clean):
                 break
-            if re.search(r"\d{1,2}:\d{2}", line_clean):
-                slot_clean = line_clean.rstrip(";").rstrip(",")
-                time_slots.append(slot_clean)
+            found = re.findall(r"\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}", line_clean)
+            raw_intervals.extend(found)
 
-    if time_slots:
-        formatted_slots = "\n".join([f"• {slot}" for slot in time_slots])
+    if raw_intervals:
+        # Уніфікуємо кожен інтервал (наприклад "02:30 - 07:30") і прибираємо можливі дублі зі збереженням порядку
+        unique_intervals = []
+        for item in raw_intervals:
+            clean_item = re.sub(r"\s*-\s*", " - ", item.strip())
+            if clean_item not in unique_intervals:
+                unique_intervals.append(clean_item)
+
+        formatted_slots = "\n".join([f"• {slot}" for slot in unique_intervals])
         return display_date, date_obj, formatted_slots
 
     return display_date, date_obj, "🟢 Для Черги 1.2 відключень у цьому графіку немає."
