@@ -127,6 +127,7 @@ def fetch_fresh_proxies():
     return proxies[:6]
 
 def get_zoe_site_page():
+    """Завантаження сайту ЗОЕ напряму, через проксі або через публічні веб-шлюзи"""
     scraper = cloudscraper.create_scraper(
         browser={"browser": "chrome", "platform": "windows", "desktop": True}
     )
@@ -137,9 +138,12 @@ def get_zoe_site_page():
     }
 
     def is_valid_zoe_html(html):
+        if not html:
+            return False
         html_lower = html.lower()
-        return "гпв" in html_lower or "черг" in html_lower or "відключен" in html_lower
+        return ("гпв" in html_lower or "черг" in html_lower) and ("1.1" in html_lower or "2.1" in html_lower)
 
+    # 1. Прямий запит
     try:
         response = scraper.get(TARGET_SITE_URL, headers=headers, timeout=15)
         if response.status_code == 200 and is_valid_zoe_html(response.text):
@@ -147,6 +151,20 @@ def get_zoe_site_page():
     except Exception:
         pass
 
+    # 2. Безкоштовні HTTP-шлюзи (надійний обхід блокування дата-центрів Render)
+    gateways = [
+        f"https://api.allorigins.win/raw?url={TARGET_SITE_URL}",
+        f"https://api.codetabs.com/v1/proxy?quest={TARGET_SITE_URL}",
+    ]
+    for gw_url in gateways:
+        try:
+            resp = requests.get(gw_url, headers=headers, timeout=15)
+            if resp.status_code == 200 and is_valid_zoe_html(resp.text):
+                return resp.text
+        except Exception:
+            continue
+
+    # 3. Перебір свіжих проксі
     for proxy in fetch_fresh_proxies():
         try:
             response = scraper.get(TARGET_SITE_URL, headers=headers, timeout=10, proxies=proxy)
@@ -155,8 +173,56 @@ def get_zoe_site_page():
         except Exception:
             continue
 
-    print("⚠️ Сайт ЗОЕ тимчасово недоступний або заблокував запит.", flush=True)
+    print("⚠️ Сайт ЗОЕ тимчасово недоступний з усіх каналів.", flush=True)
     return None
+
+def parse_zoe_site(html_text):
+    soup = BeautifulSoup(html_text, "html.parser")
+    for script in soup(["script", "style", "header", "footer", "nav"]):
+        script.decompose()
+
+    text_full = soup.get_text(separator="\n")
+    lines = [line.strip() for line in text_full.splitlines() if line.strip()]
+
+    start_idx = 0
+    for i, line in enumerate(lines):
+        if re.search(r"(?:оновлено\s*гпв|графік\s*погодинних|за\s*вказівкою\s*нек)", line.lower()):
+            start_idx = i
+            break
+
+    block_lines = []
+    for line in lines[start_idx:]:
+        if len(block_lines) > 3 and re.search(r"^(?:оновлено\s*гпв|графік\s*погодинних|за\s*вказівкою\s*нек|архів)", line.lower()):
+            break
+        block_lines.append(line)
+
+    first_block_text = "\n".join(block_lines)
+
+    if not is_schedule_post(first_block_text):
+        return []
+
+    now_kyiv = get_kyiv_now()
+    published_dt = now_kyiv
+
+    upd_match = re.search(r"оновлено\s*(\d{1,2}):(\d{2})", first_block_text.lower())
+    if upd_match:
+        h, m = int(upd_match.group(1)), int(upd_match.group(2))
+        candidate_dt = now_kyiv.replace(hour=h, minute=m, second=0, microsecond=0)
+        if candidate_dt > now_kyiv + timedelta(minutes=10):
+            candidate_dt -= timedelta(days=1)
+        published_dt = candidate_dt
+
+    # Для сайту ЗОЕ НЕ відсікаємо за MAX_POST_AGE_MINUTES, бо актуальний блок на сайті завжди один,
+    # а захист від повторів забезпечує порівняння годин із закріпленим повідомленням!
+    display_date, date_obj, schedule = extract_schedule_from_text(first_block_text, published_dt)
+    return [{
+        "display_date": display_date,
+        "date_obj": date_obj,
+        "published_ts": published_dt.timestamp(),
+        "published_str": published_dt.strftime("%Y-%m-%d %H:%M"),
+        "schedule": schedule,
+        "source": "🌐 Сайт ЗОЕ"
+    }]
 
 def get_ukrainian_months():
     return {
