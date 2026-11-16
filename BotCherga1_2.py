@@ -127,39 +127,55 @@ def fetch_fresh_proxies():
     return proxies[:6]
 
 def get_zoe_site_page():
-    """Завантаження сайту ЗОЕ напряму, через проксі або через публічні веб-шлюзи"""
+    """Завантаження свіжої сторінки сайту ЗОЕ з обходом кешу шлюзів та блокувань"""
     scraper = cloudscraper.create_scraper(
         browser={"browser": "chrome", "platform": "windows", "desktop": True}
     )
     headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8",
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
         "Pragma": "no-cache"
     }
 
-    def is_valid_zoe_html(html):
+    now_kyiv = get_kyiv_now()
+    months = get_ukrainian_months()
+    today_marker = f"{now_kyiv.day} {months[now_kyiv.month]}"
+    tomorrow_dt = now_kyiv + timedelta(days=1)
+    tomorrow_marker = f"{tomorrow_dt.day} {months[tomorrow_dt.month]}"
+
+    def is_fresh_zoe_html(html):
         if not html:
             return False
         html_lower = html.lower()
-        return ("гпв" in html_lower or "черг" in html_lower) and ("1.1" in html_lower or "2.1" in html_lower)
+        has_schedule = ("гпв" in html_lower or "черг" in html_lower) and ("1.1" in html_lower or "2.1" in html_lower)
+        if not has_schedule:
+            return False
+        # Перевіряємо, що шлюз не віддав вчорашній кеш — на сторінці має бути сьогоднішня або завтрашня дата
+        return (today_marker in html_lower) or (tomorrow_marker in html_lower)
+
+    ts_buster = int(time.time())
+    target_with_buster = f"{TARGET_SITE_URL}?_={ts_buster}"
 
     # 1. Прямий запит
     try:
-        response = scraper.get(TARGET_SITE_URL, headers=headers, timeout=15)
-        if response.status_code == 200 and is_valid_zoe_html(response.text):
+        response = scraper.get(target_with_buster, headers=headers, timeout=15)
+        if response.status_code == 200 and is_fresh_zoe_html(response.text):
             return response.text
     except Exception:
         pass
 
-    # 2. Безкоштовні HTTP-шлюзи (надійний обхід блокування дата-центрів Render)
+    # 2. HTTP-шлюзи з унікальним параметром проти кешування
+    encoded_url = requests.utils.quote(target_with_buster, safe="")
     gateways = [
-        f"https://api.allorigins.win/raw?url={TARGET_SITE_URL}",
-        f"https://api.codetabs.com/v1/proxy?quest={TARGET_SITE_URL}",
+        f"https://api.codetabs.com/v1/proxy?quest={encoded_url}",
+        f"https://api.allorigins.win/raw?url={encoded_url}",
+        f"https://corsproxy.io/?{encoded_url}",
     ]
     for gw_url in gateways:
         try:
             resp = requests.get(gw_url, headers=headers, timeout=15)
-            if resp.status_code == 200 and is_valid_zoe_html(resp.text):
+            if resp.status_code == 200 and is_fresh_zoe_html(resp.text):
                 return resp.text
         except Exception:
             continue
@@ -167,13 +183,13 @@ def get_zoe_site_page():
     # 3. Перебір свіжих проксі
     for proxy in fetch_fresh_proxies():
         try:
-            response = scraper.get(TARGET_SITE_URL, headers=headers, timeout=10, proxies=proxy)
-            if response.status_code == 200 and is_valid_zoe_html(response.text):
+            response = scraper.get(target_with_buster, headers=headers, timeout=10, proxies=proxy)
+            if response.status_code == 200 and is_fresh_zoe_html(response.text):
                 return response.text
         except Exception:
             continue
 
-    print("⚠️ Сайт ЗОЕ тимчасово недоступний з усіх каналів.", flush=True)
+    print("⚠️ Не вдалося отримати свіжу сторінку сайту ЗОЕ за сьогодні/завтра.", flush=True)
     return None
 
 def parse_zoe_site(html_text):
