@@ -25,10 +25,13 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "8631538633:AAHg84NPAG9ozFxm9_Ikjtd9H2Yp
 CHAT_ID = os.environ.get("CHAT_ID", "1033814627")
 
 TARGET_SITE_URL = "https://www.zoe.com.ua/outage/"
-TARGET_TG_URL = "https://t.me/s/Zaporizhzhyaoblenergo_news"
+TELEGRAM_CHANNELS = [
+    {"url": "https://t.me/s/Zaporizhzhyaoblenergo_news", "label": "📢 Telegram-канал ЗОЕ"},
+    {"url": "https://t.me/s/info_zp", "label": "📢 ЗАПОРІЖЖЯ.ІНФО"},
+]
 
 CHECK_INTERVAL_SECONDS = 300  # Перевірка кожні 5 хвилин
-MAX_POST_AGE_MINUTES = 45     # Ігноруємо публікації, старші за 45 хвилин
+MAX_POST_AGE_MINUTES = 45     # Ігноруємо пости в Telegram, старші за 45 хвилин
 CACHE_FILE = "schedules_by_date_1_2.json"
 
 KYIV_TZ = timezone(timedelta(hours=2))
@@ -47,7 +50,6 @@ def update_pinned_state_board(schedule_text):
         pinned = chat_resp.json().get("result", {}).get("pinned_message") if chat_resp.ok else None
 
         if pinned and "message_id" in pinned:
-            # Редагуємо вже закріплене повідомлення — це НЕ викликає сповіщень і сервісних рядків!
             requests.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
                 json={
@@ -59,7 +61,6 @@ def update_pinned_state_board(schedule_text):
                 timeout=10
             )
         else:
-            # Якщо закріпленого повідомлення ще немає — створюємо та закріплюємо один раз
             send_resp = requests.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                 json={"chat_id": CHAT_ID, "text": schedule_text, "parse_mode": "HTML"},
@@ -99,17 +100,17 @@ def normalize_text(text):
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
-def get_telegram_page():
+def get_telegram_page(tg_url):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         "Accept-Language": "uk-UA,uk;q=0.9"
     }
     try:
-        response = requests.get(TARGET_TG_URL, headers=headers, timeout=15)
+        response = requests.get(tg_url, headers=headers, timeout=15)
         if response.status_code == 200:
             return response.text
     except Exception as e:
-        print(f"⚠️ Помилка отримання Telegram-сторінки: {e}", flush=True)
+        print(f"⚠️ Помилка отримання {tg_url}: {e}", flush=True)
     return None
 
 def fetch_fresh_proxies():
@@ -125,6 +126,13 @@ def fetch_fresh_proxies():
     except Exception:
         pass
     return proxies[:6]
+
+def get_ukrainian_months():
+    return {
+        1: "січня", 2: "лютого", 3: "березня", 4: "квітня",
+        5: "травня", 6: "червня", 7: "липня", 8: "серпня",
+        9: "вересня", 10: "жовтня", 11: "листопада", 12: "грудня"
+    }
 
 def get_zoe_site_page():
     """Завантаження свіжої сторінки сайту ЗОЕ з обходом кешу шлюзів та блокувань"""
@@ -151,7 +159,6 @@ def get_zoe_site_page():
         has_schedule = ("гпв" in html_lower or "черг" in html_lower) and ("1.1" in html_lower or "2.1" in html_lower)
         if not has_schedule:
             return False
-        # Перевіряємо, що шлюз не віддав вчорашній кеш — на сторінці має бути сьогоднішня або завтрашня дата
         return (today_marker in html_lower) or (tomorrow_marker in html_lower)
 
     ts_buster = int(time.time())
@@ -192,67 +199,13 @@ def get_zoe_site_page():
     print("⚠️ Не вдалося отримати свіжу сторінку сайту ЗОЕ за сьогодні/завтра.", flush=True)
     return None
 
-def parse_zoe_site(html_text):
-    soup = BeautifulSoup(html_text, "html.parser")
-    for script in soup(["script", "style", "header", "footer", "nav"]):
-        script.decompose()
-
-    text_full = soup.get_text(separator="\n")
-    lines = [line.strip() for line in text_full.splitlines() if line.strip()]
-
-    start_idx = 0
-    for i, line in enumerate(lines):
-        if re.search(r"(?:оновлено\s*гпв|графік\s*погодинних|за\s*вказівкою\s*нек)", line.lower()):
-            start_idx = i
-            break
-
-    block_lines = []
-    for line in lines[start_idx:]:
-        if len(block_lines) > 3 and re.search(r"^(?:оновлено\s*гпв|графік\s*погодинних|за\s*вказівкою\s*нек|архів)", line.lower()):
-            break
-        block_lines.append(line)
-
-    first_block_text = "\n".join(block_lines)
-
-    if not is_schedule_post(first_block_text):
-        return []
-
-    now_kyiv = get_kyiv_now()
-    published_dt = now_kyiv
-
-    upd_match = re.search(r"оновлено\s*(\d{1,2}):(\d{2})", first_block_text.lower())
-    if upd_match:
-        h, m = int(upd_match.group(1)), int(upd_match.group(2))
-        candidate_dt = now_kyiv.replace(hour=h, minute=m, second=0, microsecond=0)
-        if candidate_dt > now_kyiv + timedelta(minutes=10):
-            candidate_dt -= timedelta(days=1)
-        published_dt = candidate_dt
-
-    # Для сайту ЗОЕ НЕ відсікаємо за MAX_POST_AGE_MINUTES, бо актуальний блок на сайті завжди один,
-    # а захист від повторів забезпечує порівняння годин із закріпленим повідомленням!
-    display_date, date_obj, schedule = extract_schedule_from_text(first_block_text, published_dt)
-    return [{
-        "display_date": display_date,
-        "date_obj": date_obj,
-        "published_ts": published_dt.timestamp(),
-        "published_str": published_dt.strftime("%Y-%m-%d %H:%M"),
-        "schedule": schedule,
-        "source": "🌐 Сайт ЗОЕ"
-    }]
-
-def get_ukrainian_months():
-    return {
-        1: "січня", 2: "лютого", 3: "березня", 4: "квітня",
-        5: "травня", 6: "червня", 7: "липня", 8: "серпня",
-        9: "вересня", 10: "жовтня", 11: "листопада", 12: "грудня"
-    }
-
 def detect_date_from_text(text, post_dt):
     months = get_ukrainian_months()
     months_rev = {v: k for k, v in months.items()}
     text_lower = text.lower()
     base_date = post_dt.date()
 
+    # 1. Словесний формат: "22 листопада"
     match_word = re.search(
         r"(\d{1,2})\s+(січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|листопада|грудня)",
         text_lower
@@ -268,6 +221,7 @@ def detect_date_from_text(text, post_dt):
         except ValueError:
             pass
 
+    # 2. Числовий формат: "22.11.2026", "22.11"
     match_num = re.search(r"\b(\d{1,2})[\.\/](\d{1,2})(?:[\.\/](\d{2,4}))?\b", text_lower)
     if match_num:
         day_num = int(match_num.group(1))
@@ -280,10 +234,12 @@ def detect_date_from_text(text, post_dt):
             except ValueError:
                 pass
 
+    # 3. Відносне слово "завтра"
     if re.search(r"\bзавтра\b", text_lower):
         target_dt = base_date + timedelta(days=1)
         return f"{target_dt.day} {months[target_dt.month].upper()}", target_dt
 
+    # 4. Слово "сьогодні" або дефолт — дата виходу допису
     return f"{base_date.day} {months[base_date.month].upper()}", base_date
 
 def restore_state_from_pinned():
@@ -300,9 +256,7 @@ def restore_state_from_pinned():
         pinned_text = pinned["text"]
         now_kyiv = get_kyiv_now()
 
-        # Витягуємо дату з рядка "Графік на дату: 15 ЛИСТОПАДА"
         date_match = re.search(r"Графік на дату:\s*(.+)", pinned_text)
-        # Витягуємо блок годин після "Черга 1.2:"
         sched_match = re.search(r"Черга 1\.2:\s*\n(.+)", pinned_text, re.DOTALL)
 
         if date_match and sched_match:
@@ -312,7 +266,7 @@ def restore_state_from_pinned():
             print(f"♻️ Відновлено пам'ять із закріпленого повідомлення за {d_str}!", flush=True)
             return {
                 d_str: {
-                    "latest_ts": 0,  # Дозволяє прийняти новіший графік, якщо години зміняться
+                    "latest_ts": 0,
                     "schedule": schedule_str
                 }
             }
@@ -326,7 +280,9 @@ def is_schedule_post(text):
         return True
     if "графіки погодинних відключень" in text_lower and ("скасовано" in text_lower or "не застосовуватимуться" in text_lower):
         return True
-    if re.search(r"(?:черга\s*)?[1-6]\.[1-2](?:\:|\s|$)", text_lower):
+    # Має бути хоча б 2 черги (наприклад 1.1 та 2.1), щоб випадкові новини з цифрами не проходили як графік
+    queues_found = re.findall(r"(?:^|\n|\s)(?:черга\s*)?[1-6]\.[1-2](?:\:|\s|$)", text_lower)
+    if len(set(queues_found)) >= 2:
         return True
     return False
 
@@ -353,7 +309,6 @@ def extract_schedule_from_text(text, post_dt):
             capture = True
             match_same_line = re.search(r"^(?:черга\s*)?1\.2\s*:\s*(.+)", line_clean, re.IGNORECASE)
             if match_same_line:
-                # Витягуємо всі пари "HH:MM - HH:MM" навіть якщо вони через кому/крапку з комою
                 found = re.findall(r"\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}", match_same_line.group(1))
                 raw_intervals.extend(found)
             continue
@@ -365,7 +320,6 @@ def extract_schedule_from_text(text, post_dt):
             raw_intervals.extend(found)
 
     if raw_intervals:
-        # Уніфікуємо кожен інтервал (наприклад "02:30 - 07:30") і прибираємо можливі дублі зі збереженням порядку
         unique_intervals = []
         for item in raw_intervals:
             clean_item = re.sub(r"\s*-\s*", " - ", item.strip())
@@ -377,13 +331,14 @@ def extract_schedule_from_text(text, post_dt):
 
     return display_date, date_obj, "🟢 Для Черги 1.2 відключень у цьому графіку немає."
 
-def parse_telegram_channel(html_text):
+def parse_telegram_channel(html_text, source_label):
     soup = BeautifulSoup(html_text, "html.parser")
     messages = soup.find_all("div", class_="tgme_widget_message_wrap")
     results = []
     now_kyiv = get_kyiv_now()
 
-    for msg_wrap in messages[-5:]:
+    # Переглядаємо останні 10 постів (актуально для новинних каналів на кшталт ЗАПОРІЖЖЯ.ІНФО)
+    for msg_wrap in messages[-10:]:
         text_div = msg_wrap.find("div", class_="tgme_widget_message_text")
         if not text_div:
             continue
@@ -411,7 +366,7 @@ def parse_telegram_channel(html_text):
             "published_ts": published_dt.timestamp(),
             "published_str": published_dt.strftime("%Y-%m-%d %H:%M"),
             "schedule": schedule,
-            "source": "📢 Telegram-канал ЗОЕ"
+            "source": source_label
         })
 
     return results
@@ -443,21 +398,14 @@ def parse_zoe_site(html_text):
 
     now_kyiv = get_kyiv_now()
     published_dt = now_kyiv
-    has_explicit_time = False
 
     upd_match = re.search(r"оновлено\s*(\d{1,2}):(\d{2})", first_block_text.lower())
     if upd_match:
-        has_explicit_time = True
         h, m = int(upd_match.group(1)), int(upd_match.group(2))
         candidate_dt = now_kyiv.replace(hour=h, minute=m, second=0, microsecond=0)
         if candidate_dt > now_kyiv + timedelta(minutes=10):
             candidate_dt -= timedelta(days=1)
         published_dt = candidate_dt
-
-    if has_explicit_time:
-        age_minutes = (now_kyiv - published_dt).total_seconds() / 60.0
-        if age_minutes > MAX_POST_AGE_MINUTES:
-            return []
 
     display_date, date_obj, schedule = extract_schedule_from_text(first_block_text, published_dt)
     return [{
@@ -476,7 +424,6 @@ def load_state_by_date():
                 return json.load(f)
         except Exception:
             pass
-    # Якщо локальний кеш зник після рестарту Render — відновлюємо із закріпленого повідомлення
     restored = restore_state_from_pinned()
     if restored:
         save_state_by_date(restored, get_kyiv_now().date())
@@ -494,20 +441,23 @@ def check_and_notify():
     today_obj = now_kyiv.date()
     tomorrow_obj = today_obj + timedelta(days=1)
 
-    print(f"[{timestamp}] Перевірка джерел (вікно свіжості: {MAX_POST_AGE_MINUTES} хв)...", flush=True)
+    print(f"[{timestamp}] Перевірка всіх джерел...", flush=True)
 
     all_candidates = []
 
-    tg_html = get_telegram_page()
-    if tg_html:
-        all_candidates.extend(parse_telegram_channel(tg_html))
+    # 1. Перевіряємо всі Telegram-канали (ЗОЕ та ЗАПОРІЖЖЯ.ІНФО)
+    for ch in TELEGRAM_CHANNELS:
+        tg_html = get_telegram_page(ch["url"])
+        if tg_html:
+            all_candidates.extend(parse_telegram_channel(tg_html, ch["label"]))
 
+    # 2. Перевіряємо офіційний сайт ЗОЕ
     site_html = get_zoe_site_page()
     if site_html:
         all_candidates.extend(parse_zoe_site(site_html))
 
     if not all_candidates:
-        print(f"Свіжих публікацій (молодших за {MAX_POST_AGE_MINUTES} хв) немає.", flush=True)
+        print("Актуальних оновлень у джерелах не знайдено.", flush=True)
         return
 
     best_per_date = {}
@@ -534,7 +484,7 @@ def check_and_notify():
 
         if cand["schedule"] != prev_schedule:
             day_label = "СЬОГОДНІ" if cand["date_obj"] == today_obj else "ЗАВТРА"
-            print(f"⚡ Свіже оновлення на {day_label} ({cand['display_date']}) з {cand['source']}! Відправляємо...", flush=True)
+            print(f"⚡ Оновлення на {day_label} ({cand['display_date']}) з {cand['source']}! Відправляємо...", flush=True)
             msg = (
                 f"⚡ <b>ОНОВЛЕННЯ ГРАФІКА ЗОЕ ({day_label})</b>\n"
                 f"📅 <b>Графік на дату:</b> <u>{cand['display_date']}</u>\n"
@@ -563,7 +513,7 @@ def check_and_notify():
         print("Нових змін у графіках немає.", flush=True)
 
 def bot_loop():
-    print("🚀 Безкоштовний автономний моніторинг ЗОЕ запущено!", flush=True)
+    print("🚀 Безкоштовний автономний моніторинг ЗОЕ + ЗАПОРІЖЖЯ.ІНФО запущено!", flush=True)
 
     while True:
         try:
